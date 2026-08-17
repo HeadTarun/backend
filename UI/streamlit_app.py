@@ -44,4 +44,13 @@ if submitted:
                 st.warning(warning)
         st.download_button("Download JSON", json.dumps(result, indent=2), file_name=f"{mpn or 'product'}.json")
     else:
-        st.error(response.text)
+        try:
+            err = response.json()
+            st.error(
+                f"**{response.status_code} — {err.get('error', 'error')}**\n\n"
+                f"{err.get('detail', response.text)}"
+            )
+            if rid := err.get("request_id"):
+                st.caption(f"Request ID: `{rid}` — check the FastAPI server terminal for the full traceback.")
+        except Exception:
+            st.error(f"{response.status_code}: {response.text}")

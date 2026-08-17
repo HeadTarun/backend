@@ -1,9 +1,13 @@
 import json
+import logging
 import re
 from dataclasses import dataclass
 from typing import Any
 
 from bs4 import BeautifulSoup
+
+logger = logging.getLogger(__name__)
+
 
 try:
     from playwright.sync_api import TimeoutError as PlaywrightTimeoutError
@@ -52,31 +56,75 @@ class ProductPageScraper:
         self.max_chars = max_chars
 
     def scrape(self, url: str) -> ScrapedProductPage:
-        if sync_playwright is None:
-            raise RuntimeError("Install Playwright with `uv sync`, then run `uv run playwright install chromium`.")
-
-        with sync_playwright() as playwright:
-            browser = playwright.chromium.launch(headless=True)
-            page = browser.new_page(
-                user_agent=(
-                    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
-                    "AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120 Safari/537.36"
-                )
-            )
-            try:
-                page.goto(url, wait_until="domcontentloaded", timeout=self.timeout_ms)
-                self._best_effort_wait(page)
-                html = page.content()
-            finally:
-                browser.close()
-
+        html = self._fetch_html(url)
         return self._parse(url, html)
 
     def scrape_many(self, urls: list[str]) -> list[ScrapedProductPage]:
-        pages: list[ScrapedProductPage] = []
-        for url in urls:
-            pages.append(self.scrape(url))
-        return pages
+        if not urls:
+            return []
+
+        # Try Playwright with a single browser instance
+        if sync_playwright is not None:
+            try:
+                with sync_playwright() as playwright:
+                    browser = playwright.chromium.launch(headless=True)
+                    page = browser.new_page(
+                        user_agent=(
+                            "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+                            "AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120 Safari/537.36"
+                        )
+                    )
+                    pages: list[ScrapedProductPage] = []
+                    for url in urls:
+                        try:
+                            page.goto(url, wait_until="domcontentloaded", timeout=self.timeout_ms)
+                            self._best_effort_wait(page)
+                            html = page.content()
+                            pages.append(self._parse(url, html))
+                        except Exception as exc:
+                            logger.warning("Playwright failed for URL %s: %s (falling back to httpx)", url, exc)
+                            html = self._fetch_html_httpx(url)
+                            pages.append(self._parse(url, html))
+                    browser.close()
+                    return pages
+            except Exception as exc:
+                logger.warning("Playwright browser launch failed: %s (using HTTP fallback)", exc)
+
+        # Fallback for all URLs using httpx
+        return [self.scrape(url) for url in urls]
+
+    def _fetch_html(self, url: str) -> str:
+        if sync_playwright is not None:
+            try:
+                with sync_playwright() as playwright:
+                    browser = playwright.chromium.launch(headless=True)
+                    page = browser.new_page(
+                        user_agent=(
+                            "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+                            "AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120 Safari/537.36"
+                        )
+                    )
+                    try:
+                        page.goto(url, wait_until="domcontentloaded", timeout=self.timeout_ms)
+                        self._best_effort_wait(page)
+                        return page.content()
+                    finally:
+                        browser.close()
+            except Exception as exc:
+                logger.warning("Playwright scrape failed for %s: %s (using httpx)", url, exc)
+
+        return self._fetch_html_httpx(url)
+
+    def _fetch_html_httpx(self, url: str) -> str:
+        import httpx
+        try:
+            headers = {"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) Chrome/120"}
+            resp = httpx.get(url, headers=headers, timeout=self.timeout_ms / 1000, follow_redirects=True)
+            return resp.text
+        except Exception as exc:
+            logger.warning("HTTP fetch failed for %s: %s", url, exc)
+            return f"<html><body><p>Failed to scrape {url}: {exc}</p></body></html>"
+
 
     def _best_effort_wait(self, page: Any) -> None:
         try:

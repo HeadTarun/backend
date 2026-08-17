@@ -40,17 +40,17 @@ def create_product_deep_agent(
     agent_tools = tools or AgentTools(store, scraper=scraper)
 
     def retrieve_similar_products(manufacturer_part_number: str, brand: str, short_description: str) -> str:
-        """Retrieve validated products with the same MPN or similar descriptions."""
+        """Retrieve validated products with the same MPN or similar descriptions from Supabase database."""
         product = ProductInput(
             manufacturer_part_number=manufacturer_part_number,
             brand=brand,
             short_description=short_description,
         )
         matches = agent_tools.retrieve_similar_products(product)
-        return "\n".join(match.product.model_dump_json() for match in matches) or "No similar products found."
+        return "\n".join(match.product.model_dump_json() for match in matches) or "No similar products found in database."
 
     def save_structured_output(payload_json: str) -> str:
-        """Save a validated ProductIntelligence JSON payload to Supabase."""
+        """Save a validated ProductIntelligence JSON payload to Supabase database."""
         from product_agent.schemas import ProductIntelligence
 
         product = ProductIntelligence.model_validate_json(payload_json)
@@ -62,15 +62,31 @@ def create_product_deep_agent(
         return sanitize_untrusted_text(text) or ""
 
     def scrape_product_url(url: str) -> str:
-        """Render a product URL with Playwright and extract product details with Beautiful Soup."""
+        """Render a product URL with Playwright browser and extract visible page content and specs."""
         return agent_tools.scrape_product_url(url)
+
+    def search_web_tavily(query: str) -> str:
+        """Search the web for industrial product specifications using custom query via Tavily API."""
+        return agent_tools.tavily_search(query)
+
+    def auto_search_and_scrape(manufacturer_part_number: str, brand: str, short_description: str) -> str:
+        """Automatically search the web via Tavily and scrape product spec sheets using Playwright."""
+        return agent_tools.auto_search_and_scrape(manufacturer_part_number, brand, short_description)
 
     return create_deep_agent(
         model=model or build_qwen_vl_chat_model(settings),
         system_prompt=SYSTEM_PROMPT,
-        tools=[retrieve_similar_products, save_structured_output, sanitize_source_text, scrape_product_url],
+        tools=[
+            retrieve_similar_products,
+            save_structured_output,
+            sanitize_source_text,
+            scrape_product_url,
+            search_web_tavily,
+            auto_search_and_scrape,
+        ],
         middleware=[*build_pii_middleware(), *build_rubric_middleware(settings)],
     )
+
 
 
 def deep_agent_input(product: ProductInput) -> dict[str, Any]:

@@ -88,3 +88,27 @@ def build_qwen_vl_chat_model(settings: Settings | None = None) -> HuggingFaceQwe
         max_new_tokens=settings.hf_max_new_tokens,
         temperature=settings.hf_temperature,
     )
+
+
+DEFAULT_OLLAMA_MODEL = "qwen3.5:4b"
+
+
+def build_ollama_qwen_model(settings: Settings | None = None) -> Any:
+    """Build a local Ollama Qwen3 chat model via langchain-ollama.
+
+    Requires Ollama to be running locally with the model already pulled::
+
+        ollama pull qwen3:4b
+
+    The model name can be overridden with the OLLAMA_MODEL environment variable.
+    """
+    try:
+        from langchain_ollama import ChatOllama
+    except ImportError as exc:
+        raise RuntimeError(
+            "Install langchain-ollama (`uv sync`) before using the Ollama fallback model."
+        ) from exc
+    settings = settings or get_settings()
+    import os
+    model_name = os.getenv("OLLAMA_MODEL", DEFAULT_OLLAMA_MODEL)
+    return ChatOllama(model=model_name, temperature=settings.hf_temperature)
