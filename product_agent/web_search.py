@@ -50,21 +50,10 @@ class ProductSearchResults:
 
 
 class ProductWebSearcher:
-    """Searches the web for product specification pages via the Tavily API."""
-
-    # Sites commonly reliable for industrial product specs
-    _PREFERRED_DOMAINS = [
-        "datasheet.datasheetarchive.com",
-        "octopart.com",
-        "mouser.com",
-        "digikey.com",
-        "rs-online.com",
-        "farnell.com",
-        "grainger.com",
-        "automationdirect.com",
-    ]
+    """Searches the web across all sites on the internet for product specification pages via the Tavily API."""
 
     def __init__(self, api_key: str, max_results: int = 5) -> None:
+
         self.client: Any = None
         self.max_results = max_results
         try:

@@ -24,4 +24,5 @@ dependencies = [
     "ollama>=0.6.2",
     "langchain-ollama>=1.1.0",
     "huggingface-hub>=1.27.0",
+    "tavily-python>=0.7.27",
 ]
