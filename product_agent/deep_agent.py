@@ -5,7 +5,7 @@ from deepagents import create_deep_agent
 from product_agent.config import Settings, get_settings
 from product_agent.evaluation import build_rubric_middleware, product_intelligence_rubric
 from product_agent.guardrails import build_pii_middleware, sanitize_untrusted_text
-from product_agent.llm import build_qwen_vl_chat_model
+from product_agent.llm import build_gateway_chat_model
 from product_agent.schemas import ProductInput
 from product_agent.scraper import ProductPageScraper
 from product_agent.storage import ProductStore
@@ -15,11 +15,28 @@ from product_agent.tools import AgentTools
 SYSTEM_PROMPT = """You are an industrial commerce product intelligence agent.
 
 Given limited product inputs, produce structured, commerce-ready product
-intelligence. Ground claims in supplied text, supplied URLs, retrieved similar
-products, or mark them as inferred. Preserve source evidence and confidence.
-Never expose secrets, product-sensitive internal identifiers, confidential
-launch details, supplier costs, contract prices, margins, serial numbers, or
-license keys.
+intelligence as valid JSON matching the ProductIntelligence schema:
+{
+  "manufacturer_part_number": "...",
+  "brand": "...",
+  "title": "...",
+  "category": "...",
+  "commerce_description": "...",
+  "image_url": "...",
+  "images": [...],
+  "key_features": [...],
+  "specifications": [
+    {"name": "Specification Name", "value": "Value", "unit": "Unit or null", "source": "extracted_spec"}
+  ],
+  "applications": [...],
+  "normalized_attributes": {"attribute_key": "attribute_value"},
+  "quality_warnings": [],
+  "confidence": "medium"
+}
+
+Ground claims in supplied text, supplied URLs, retrieved similar products, or mark them as inferred.
+Extract all measurable technical, electrical, and mechanical specifications into the specifications array.
+Never expose secrets, product-sensitive internal identifiers, confidential launch details, supplier costs, contract prices, margins, serial numbers, or license keys.
 """
 
 
@@ -74,15 +91,13 @@ def create_product_deep_agent(
         return agent_tools.auto_search_and_scrape(manufacturer_part_number, brand, short_description)
 
     return create_deep_agent(
-        model=model or build_qwen_vl_chat_model(settings),
+        model=model or build_gateway_chat_model(settings),
         system_prompt=SYSTEM_PROMPT,
         tools=[
             retrieve_similar_products,
             save_structured_output,
             sanitize_source_text,
-            scrape_product_url,
             search_web_tavily,
-            auto_search_and_scrape,
         ],
         middleware=[*build_pii_middleware(), *build_rubric_middleware(settings)],
     )

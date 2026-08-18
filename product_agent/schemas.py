@@ -15,6 +15,7 @@ class ProductInput(BaseModel):
     short_description: str = Field(min_length=1)
     supporting_urls: list[HttpUrl] = Field(default_factory=list)
     supporting_text: str | None = None
+    custom_image_url: str | None = None
 
 
 class ProductSpec(BaseModel):
@@ -37,6 +38,8 @@ class ProductIntelligence(BaseModel):
     title: str
     category: str
     commerce_description: str
+    image_url: str | None = None
+    images: list[str] = Field(default_factory=list)
     key_features: list[str] = Field(default_factory=list)
     specifications: list[ProductSpec] = Field(default_factory=list)
     applications: list[str] = Field(default_factory=list)

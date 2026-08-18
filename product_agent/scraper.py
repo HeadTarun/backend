@@ -1,7 +1,7 @@
 import json
 import logging
 import re
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Any
 
 from bs4 import BeautifulSoup
@@ -36,6 +36,7 @@ class ScrapedProductPage:
     description: str | None
     text: str
     structured_data: list[dict[str, Any]]
+    image_urls: list[str] = field(default_factory=list)
 
     def to_agent_text(self, max_chars: int = 8000) -> str:
         chunks = [f"URL: {self.url}"]
@@ -43,6 +44,8 @@ class ScrapedProductPage:
             chunks.append(f"Title: {self.title}")
         if self.description:
             chunks.append(f"Meta description: {self.description}")
+        if self.image_urls:
+            chunks.append(f"Product Images: {self.image_urls[:3]}")
         if self.structured_data:
             chunks.append(f"Structured data: {json.dumps(self.structured_data[:3], ensure_ascii=True)}")
         if self.text:
@@ -51,7 +54,7 @@ class ScrapedProductPage:
 
 
 class ProductPageScraper:
-    def __init__(self, *, timeout_ms: int = 20000, max_chars: int = 8000) -> None:
+    def __init__(self, *, timeout_ms: int = 8000, max_chars: int = 8000) -> None:
         self.timeout_ms = timeout_ms
         self.max_chars = max_chars
 
@@ -133,7 +136,87 @@ class ProductPageScraper:
             pass
 
     def _parse(self, url: str, html: str) -> ScrapedProductPage:
+        from urllib.parse import urljoin
         soup = BeautifulSoup(html, "html.parser")
+
+        # Extract images before decomposition
+        image_urls: list[str] = []
+        skip_terms = ["logo", "icon", "blank", "avatar", "loader", "button", "sprite", "pixel", "1x1", "tracking", "cart", "checkout", "banner", "footer", "nav"]
+
+        def _add_valid_image(url_str: str, priority_insert: bool = False) -> None:
+            if not url_str or not url_str.strip():
+                return
+            abs_url = urljoin(url, url_str.strip())
+            if abs_url.startswith("http") and not any(skip in abs_url.lower() for skip in skip_terms):
+                if abs_url not in image_urls:
+                    if priority_insert:
+                        image_urls.insert(0, abs_url)
+                    else:
+                        image_urls.append(abs_url)
+
+        # 1. Meta tags (highest priority)
+        meta_imgs = [
+            self._meta_content(soup, "og:image"),
+            self._meta_content(soup, "og:image:secure_url"),
+            self._meta_content(soup, "twitter:image"),
+            self._meta_content(soup, "twitter:image:src"),
+            self._meta_content(soup, "image"),
+        ]
+        for meta_img in meta_imgs:
+            if meta_img:
+                _add_valid_image(meta_img)
+
+        link_img = soup.select_one("link[rel='image_src']")
+        if link_img and link_img.get("href"):
+            _add_valid_image(str(link_img.get("href")))
+
+        # 2. JSON-LD Structured Data
+        structured_data = self._structured_product_data(html)
+        for block in structured_data:
+            img = block.get("image")
+            if isinstance(img, str):
+                _add_valid_image(img, priority_insert=True)
+            elif isinstance(img, list):
+                for item in img:
+                    if isinstance(item, str):
+                        _add_valid_image(item, priority_insert=True)
+                    elif isinstance(item, dict) and item.get("url"):
+                        _add_valid_image(str(item.get("url")), priority_insert=True)
+
+        # 3. Microdata & Product-Specific Containers
+        product_selectors = [
+            "[itemprop='image']",
+            "[class*='product-image' i] img",
+            "[class*='product-photo' i] img",
+            "[class*='product-media' i] img",
+            "[class*='main-image' i] img",
+            "[id*='product-image' i] img",
+            "[id*='main-image' i] img",
+            ".gallery-image img",
+            ".product-gallery img",
+        ]
+        for sel in product_selectors:
+            for elem in soup.select(sel):
+                for attr in ["src", "data-src", "data-zoom-image", "data-large-image", "data-high-res-src", "content", "href"]:
+                    val = elem.get(attr)
+                    if isinstance(val, str) and val.strip():
+                        _add_valid_image(val)
+
+        # 4. Picture source tags
+        for source_tag in soup.select("picture source"):
+            raw_srcset = source_tag.get("srcset") or source_tag.get("data-srcset")
+            if isinstance(raw_srcset, str) and raw_srcset.strip():
+                src_val = raw_srcset.strip().split(",")[0].split()[0]
+                _add_valid_image(src_val)
+
+        # 5. General img tags
+        for img_tag in soup.select("img"):
+            for attr in ["src", "data-src", "data-original", "data-lazy-src", "data-zoom-image", "data-high-res-src", "data-large-image", "data-product-image", "data-image", "data-image-src", "srcset", "data-srcset"]:
+                raw_src = img_tag.get(attr)
+                if isinstance(raw_src, str) and raw_src.strip():
+                    src_val = raw_src.strip().split(",")[0].split()[0]
+                    _add_valid_image(src_val)
+
         for tag in soup(["script", "style", "noscript", "svg"]):
             tag.decompose()
 
@@ -143,7 +226,6 @@ class ProductPageScraper:
             soup.select_one("title"),
         )
         description = self._meta_content(soup, "description") or self._meta_content(soup, "og:description")
-        structured_data = self._structured_product_data(html)
         visible_text = sanitize_untrusted_text(self._product_text(soup)) or ""
 
         return ScrapedProductPage(
@@ -152,6 +234,7 @@ class ProductPageScraper:
             description=description,
             text=visible_text[: self.max_chars],
             structured_data=structured_data,
+            image_urls=image_urls[:6],
         )
 
     def _product_text(self, soup: BeautifulSoup) -> str:
