@@ -86,9 +86,11 @@ def _traceable(name: str, run_type: str = "chain") -> Any:
 
 def configure_langsmith(settings: Settings | None = None) -> None:
     settings = settings or get_settings()
+    if settings.langsmith_api_key:
+        os.environ["LANGSMITH_API_KEY"] = settings.langsmith_api_key
     if settings.langsmith_tracing:
-        os.environ.setdefault("LANGSMITH_TRACING", "true")
-        os.environ.setdefault("LANGSMITH_PROJECT", settings.langsmith_project)
+        os.environ["LANGSMITH_TRACING"] = "true"
+        os.environ["LANGSMITH_PROJECT"] = settings.langsmith_project
 
 
 def build_rubric_middleware(settings: Settings | None = None) -> list[Any]:
@@ -116,6 +118,7 @@ def product_intelligence_rubric() -> str:
 
 @_traceable(name="product_intelligence_evaluation", run_type="chain")
 def evaluate_product_output(product_input: ProductInput, output: ProductIntelligence) -> list[RubricScore]:
+    configure_langsmith()
     scores = [
         RubricScore("completeness", _score_completeness(output), "Checks required commerce fields and review metadata."),
         RubricScore("groundedness", _score_groundedness(product_input, output), "Checks that identifiers and evidence are preserved."),

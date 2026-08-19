@@ -31,6 +31,8 @@ logger = logging.getLogger(__name__)
 async def lifespan(application: FastAPI):
     """Verify critical dependencies are reachable before accepting traffic."""
     logger.info("Starting Industrial Commerce Product AI Agent...")
+    from product_agent.evaluation import configure_langsmith
+    configure_langsmith()
     try:
         orchestrator.component_status()
         logger.info("Startup checks passed.")
