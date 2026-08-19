@@ -39,9 +39,16 @@ class AgentTools:
         """Persist structured ProductIntelligence object into Supabase database."""
         return self.store.save(product)
 
-    def parse_doc_or_image(self, text: str | None) -> str | None:
-        """Sanitize raw document or OCR text to strip sensitive key/prompt injection patterns."""
-        return sanitize_untrusted_text(text)
+    def parse_doc_or_image(self, text_or_path: str | None) -> str | None:
+        """Parse industrial document or sanitize raw text using LlamaCloud Document Intelligence."""
+        if not text_or_path:
+            return None
+        # If input looks like a document filepath or URL, run LlamaCloud
+        if text_or_path.endswith((".pdf", ".docx", ".pptx", ".txt")) or text_or_path.startswith(("http://", "https://")):
+            parsed = self.scraper.parse_document_with_llama_cloud(text_or_path)
+            if parsed:
+                return parsed
+        return sanitize_untrusted_text(text_or_path)
 
     def web_search(self, product: ProductInput) -> list[str]:
         """Return list of supporting URLs provided in product input or discovered via Tavily."""

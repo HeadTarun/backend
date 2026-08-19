@@ -34,6 +34,7 @@ class Settings(BaseModel):
     langsmith_api_key: str | None = None
     langsmith_tracing: bool = True
     langsmith_project: str = "industrial-commerce-product-agent"
+    llama_cloud_api_key: str | None = None
     hf_max_new_tokens: int = 2048
     hf_temperature: float = 0.1
 
@@ -62,6 +63,7 @@ def get_settings() -> Settings:
         langsmith_api_key=l_key,
         langsmith_tracing=l_tracing,
         langsmith_project=_env("LANGSMITH_PROJECT", default="industrial-commerce-product-agent") or "industrial-commerce-product-agent",
+        llama_cloud_api_key=_env("LLAMA_CLOUD_API_KEY", "llama_cloud_api_key", "LLAMAPARSE_API_KEY", "llamaparse_api_key"),
         hf_max_new_tokens=int(_env("HF_MAX_NEW_TOKENS", default="2048") or "2048"),
         hf_temperature=float(_env("HF_TEMPERATURE", default="0.1") or "0.1"),
     )

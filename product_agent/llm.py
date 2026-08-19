@@ -62,7 +62,7 @@ class LiteLLMGatewayChatModel(BaseChatModel):
 
         formatted_messages = [self._convert_message(m) for m in messages]
         candidates = [self.model, *[m for m in self.fallback_models if m != self.model]]
-
+  
         last_error = None
         for candidate in candidates:
             try:
@@ -157,16 +157,26 @@ def build_gateway_chat_model(settings: Settings | None = None) -> LiteLLMGateway
     )
 
 
-# Backward compatibility helpers
+# Backward compatibility & provider-specific helpers
 try:
     from huggingface_hub import InferenceClient
 except ImportError:
     InferenceClient = None
 
 
-def build_qwen_vl_chat_model(settings: Settings | None = None) -> Any:
+def build_qwen_vl_chat_model(settings: Settings | None = None) -> LiteLLMGatewayChatModel:
+    """Build AI Gateway model (alias for backward compatibility)."""
     return build_gateway_chat_model(settings)
 
 
-def build_ollama_qwen_model(settings: Settings | None = None) -> Any:
-    return build_gateway_chat_model(settings)
+def build_ollama_qwen_model(settings: Settings | None = None) -> LiteLLMGatewayChatModel:
+    """Build a dedicated local Ollama chat model with AI Gateway fallback."""
+    settings = settings or get_settings()
+    ollama_tag = settings.ollama_model if settings.ollama_model.startswith("ollama/") else f"ollama/{settings.ollama_model}"
+    return LiteLLMGatewayChatModel(
+        model=ollama_tag,
+        fallback_models=["ollama/qwen3-vl-4b", "ollama/qwen2.5-coder:7b"],
+        temperature=settings.hf_temperature,
+        max_tokens=settings.hf_max_new_tokens,
+    )
+

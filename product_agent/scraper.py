@@ -16,6 +16,15 @@ except ImportError:
     PlaywrightTimeoutError = TimeoutError  # type: ignore[assignment]
     sync_playwright = None  # type: ignore[assignment]
 
+try:
+    from llama_parse import LlamaParse
+except ImportError:
+    try:
+        from llama_cloud import LlamaCloud  # type: ignore[assignment]
+    except ImportError:
+        LlamaParse = None  # type: ignore[assignment]
+
+from product_agent.config import get_settings
 from product_agent.guardrails import sanitize_untrusted_text
 
 
@@ -54,11 +63,65 @@ class ScrapedProductPage:
 
 
 class ProductPageScraper:
-    def __init__(self, *, timeout_ms: int = 8000, max_chars: int = 8000) -> None:
+    def __init__(self, *, timeout_ms: int = 8000, max_chars: int = 8000, llama_api_key: str | None = None) -> None:
         self.timeout_ms = timeout_ms
         self.max_chars = max_chars
+        settings = get_settings()
+        self.llama_api_key = llama_api_key or settings.llama_cloud_api_key
+
+    def parse_document_with_llama_cloud(self, file_path_or_url: str) -> str | None:
+        """Parse complex industrial document (PDF/DOCX/Spec Sheet) using LlamaCloud Document Intelligence."""
+        if not self.llama_api_key:
+            logger.warning("LlamaCloud skipped: LLAMA_CLOUD_API_KEY / LLAMAPARSE_API_KEY not configured.")
+            return None
+        if LlamaParse is None:
+            logger.warning("LlamaCloud skipped: `llama-cloud` / `llama-parse` package not installed.")
+            return None
+
+        try:
+            logger.info("Parsing document via LlamaCloud Document Intelligence: %s", file_path_or_url)
+            parser = LlamaParse(
+                api_key=self.llama_api_key,
+                result_type="markdown",
+                verbose=False,
+            )
+            # Check if input is a local file or remote URL
+            if file_path_or_url.startswith("http://") or file_path_or_url.startswith("https://"):
+                import httpx
+                import tempfile
+                resp = httpx.get(file_path_or_url, timeout=30.0, follow_redirects=True)
+                suffix = ".pdf" if ".pdf" in file_path_or_url.lower() else ".tmp"
+                with tempfile.NamedTemporaryFile(delete=False, suffix=suffix) as tmp:
+                    tmp.write(resp.content)
+                    tmp_path = tmp.name
+                documents = parser.load_data(tmp_path)
+            else:
+                documents = parser.load_data(file_path_or_url)
+
+            text_chunks = [doc.text for doc in documents if hasattr(doc, "text") and doc.text]
+            parsed_text = "\n\n".join(text_chunks)
+            return sanitize_untrusted_text(parsed_text)
+        except Exception as exc:
+            logger.warning("LlamaCloud document intelligence failed for %s: %s", file_path_or_url, exc)
+            return None
+
+    # Backward compatibility alias
+    parse_document_with_llamaparse = parse_document_with_llama_cloud
 
     def scrape(self, url: str) -> ScrapedProductPage:
+        # Check if URL points directly to a PDF/document datasheet
+        if url.lower().endswith(".pdf") or ".pdf?" in url.lower():
+            parsed_doc = self.parse_document_with_llama_cloud(url)
+            if parsed_doc:
+                return ScrapedProductPage(
+                    url=url,
+                    title="PDF Datasheet (Parsed by LlamaCloud)",
+                    description="Industrial PDF Datasheet document parsed via LlamaCloud Document Intelligence",
+                    text=parsed_doc[: self.max_chars],
+                    structured_data=[],
+                    image_urls=[],
+                )
+
         html = self._fetch_html(url)
         return self._parse(url, html)
 
