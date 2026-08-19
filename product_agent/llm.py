@@ -62,7 +62,7 @@ class LiteLLMGatewayChatModel(BaseChatModel):
 
         formatted_messages = [self._convert_message(m) for m in messages]
         candidates = [self.model, *[m for m in self.fallback_models if m != self.model]]
-  
+
         last_error = None
         for candidate in candidates:
             try:
@@ -76,7 +76,7 @@ class LiteLLMGatewayChatModel(BaseChatModel):
                 if self.api_key:
                     request["api_key"] = self.api_key
                 if self.bound_tools:
-                    request["tools"] = self.bound_tools
+                    request["tools"] = self._format_tools_for_litellm(self.bound_tools)
                     request.update(self.tool_kwargs)
                 if stop:
                     request["stop"] = stop
@@ -100,6 +100,41 @@ class LiteLLMGatewayChatModel(BaseChatModel):
                 continue
 
         raise RuntimeError(f"All LiteLLM AI Gateway models failed ({candidates}). Last error: {last_error}")
+
+    @staticmethod
+    def _format_tools_for_litellm(tools: Any) -> Any:
+        if not tools:
+            return None
+        try:
+            from langchain_core.utils.function_calling import convert_to_openai_tool
+            tool_list = tools if isinstance(tools, (list, tuple)) else [tools]
+            formatted = []
+            for t in tool_list:
+                try:
+                    formatted.append(convert_to_openai_tool(t))
+                except Exception:
+                    if hasattr(t, "model_json_schema"):
+                        formatted.append({
+                            "type": "function",
+                            "function": {
+                                "name": getattr(t, "__name__", "structured_output"),
+                                "parameters": t.model_json_schema(),
+                            }
+                        })
+                    elif hasattr(t, "schema"):
+                        formatted.append({
+                            "type": "function",
+                            "function": {
+                                "name": getattr(t, "__name__", "structured_output"),
+                                "parameters": t.schema(),
+                            }
+                        })
+                    else:
+                        formatted.append(t)
+            return formatted
+        except Exception as exc:
+            logger.debug("Tool formatting fallback: %s", exc)
+            return tools
 
     @staticmethod
     def _convert_message(message: BaseMessage) -> dict[str, Any]:
@@ -157,26 +192,16 @@ def build_gateway_chat_model(settings: Settings | None = None) -> LiteLLMGateway
     )
 
 
-# Backward compatibility & provider-specific helpers
+# Backward compatibility helpers
 try:
     from huggingface_hub import InferenceClient
 except ImportError:
     InferenceClient = None
 
 
-def build_qwen_vl_chat_model(settings: Settings | None = None) -> LiteLLMGatewayChatModel:
-    """Build AI Gateway model (alias for backward compatibility)."""
+def build_qwen_vl_chat_model(settings: Settings | None = None) -> Any:
     return build_gateway_chat_model(settings)
 
 
-def build_ollama_qwen_model(settings: Settings | None = None) -> LiteLLMGatewayChatModel:
-    """Build a dedicated local Ollama chat model with AI Gateway fallback."""
-    settings = settings or get_settings()
-    ollama_tag = settings.ollama_model if settings.ollama_model.startswith("ollama/") else f"ollama/{settings.ollama_model}"
-    return LiteLLMGatewayChatModel(
-        model=ollama_tag,
-        fallback_models=["ollama/qwen3-vl-4b", "ollama/qwen2.5-coder:7b"],
-        temperature=settings.hf_temperature,
-        max_tokens=settings.hf_max_new_tokens,
-    )
-
+def build_ollama_qwen_model(settings: Settings | None = None) -> Any:
+    return build_gateway_chat_model(settings)

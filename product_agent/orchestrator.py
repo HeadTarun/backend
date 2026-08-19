@@ -55,10 +55,7 @@ class ProductIntelligenceOrchestrator:
             settings.supabase_key,
             settings.supabase_products_table,
         )
-
         from product_agent.web_search import ProductWebSearcher
-        from product_agent.evaluation import configure_langsmith
-        configure_langsmith(settings)
 
         self.scraper = scraper or ProductPageScraper()
         searcher = ProductWebSearcher(settings.tavily_api_key, settings.tavily_max_results) if settings.tavily_api_key else None
@@ -266,7 +263,7 @@ class ProductIntelligenceOrchestrator:
         image_urls: list[str] = []
         urls_to_scrape = [str(u) for u in product.supporting_urls]
 
-        # If user gave no URLs, try Tavily web search to discover them (only if web searcher available)
+        # If user gave no URLs, try Tavily web search to discover them
         if not urls_to_scrape and self.tools.searcher:
             try:
                 search_res = self.tools.searcher.search_product(
@@ -308,8 +305,8 @@ class ProductIntelligenceOrchestrator:
             except Exception as exc:
                 logger.warning("Scraping failed: %s", exc)
 
-        # Web image search fallback ONLY if URLs were provided or Tavily was active, but scraping yielded no images
-        if not image_urls and (product.supporting_urls or self.tools.searcher):
+        # Guaranteed direct web image search fallback if no images were extracted yet
+        if not image_urls:
             try:
                 from product_agent.web_search import search_duckduckgo_images
                 ddg_imgs = search_duckduckgo_images(f"{product.brand} {product.manufacturer_part_number} product", max_results=5)

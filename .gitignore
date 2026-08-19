@@ -7,8 +7,19 @@ wheels/
 *.egg-info
 
 # Virtual environments
-.venv
+.venv/
+env/
+venv/
+
+# Node / Frontend
+node_modules/
+**/node_modules/
+UI/frontend/node_modules/
+UI/frontend/dist/
+.vite/
 
 # Local runtime state and secrets
 .env
 data/
+*.log
+.DS_Store

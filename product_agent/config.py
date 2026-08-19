@@ -31,10 +31,8 @@ class Settings(BaseModel):
     tavily_api_key: str | None = None
     tavily_max_results: int = 5
     enable_web_search: bool = False
-    langsmith_api_key: str | None = None
-    langsmith_tracing: bool = True
+    langsmith_tracing: bool = False
     langsmith_project: str = "industrial-commerce-product-agent"
-    llama_cloud_api_key: str | None = None
     hf_max_new_tokens: int = 2048
     hf_temperature: float = 0.1
 
@@ -42,9 +40,6 @@ class Settings(BaseModel):
 @lru_cache
 def get_settings() -> Settings:
     tbl = _env("SUPABASE_PRODUCTS_TABLE", "supabase_products_table", default="rag_products") or "rag_products"
-    l_key = _env("LANGSMITH_API_KEY", "langsmith_api_key")
-    l_tracing_str = _env("LANGSMITH_TRACING", "langsmith_tracing")
-    l_tracing = (l_tracing_str.lower() == "true") if l_tracing_str else bool(l_key)
     return Settings(
         supabase_url=_env("SUPABASE_URL", "supabase_url"),
         supabase_key=_env("SUPABASE_SERVICE_ROLE_KEY", "SUPABASE_ANON_KEY", "supabase_service_key", "supabase_anon_key"),
@@ -60,10 +55,8 @@ def get_settings() -> Settings:
         tavily_api_key=_env("TAVILY_API_KEY", "tavily_api_key", "TAVILY_API", "tavily_api"),
         tavily_max_results=int(_env("TAVILY_MAX_RESULTS", default="5") or "5"),
         enable_web_search=bool(_env("TAVILY_API_KEY", "tavily_api_key", "TAVILY_API", "tavily_api")),
-        langsmith_api_key=l_key,
-        langsmith_tracing=l_tracing,
+        langsmith_tracing=(_env("LANGSMITH_TRACING", default="false") or "false").lower() == "true",
         langsmith_project=_env("LANGSMITH_PROJECT", default="industrial-commerce-product-agent") or "industrial-commerce-product-agent",
-        llama_cloud_api_key=_env("LLAMA_CLOUD_API_KEY", "llama_cloud_api_key", "LLAMAPARSE_API_KEY", "llamaparse_api_key"),
         hf_max_new_tokens=int(_env("HF_MAX_NEW_TOKENS", default="2048") or "2048"),
         hf_temperature=float(_env("HF_TEMPERATURE", default="0.1") or "0.1"),
     )

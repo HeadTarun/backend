@@ -16,15 +16,6 @@ except ImportError:
     PlaywrightTimeoutError = TimeoutError  # type: ignore[assignment]
     sync_playwright = None  # type: ignore[assignment]
 
-try:
-    from llama_parse import LlamaParse
-except ImportError:
-    try:
-        from llama_cloud import LlamaCloud  # type: ignore[assignment]
-    except ImportError:
-        LlamaParse = None  # type: ignore[assignment]
-
-from product_agent.config import get_settings
 from product_agent.guardrails import sanitize_untrusted_text
 
 
@@ -63,132 +54,42 @@ class ScrapedProductPage:
 
 
 class ProductPageScraper:
-    def __init__(self, *, timeout_ms: int = 8000, max_chars: int = 8000, llama_api_key: str | None = None) -> None:
+    def __init__(self, *, timeout_ms: int = 8000, max_chars: int = 8000) -> None:
         self.timeout_ms = timeout_ms
         self.max_chars = max_chars
-        settings = get_settings()
-        self.llama_api_key = llama_api_key or settings.llama_cloud_api_key
-
-    def parse_document_with_llama_cloud(self, file_path_or_url: str) -> str | None:
-        """Parse complex industrial document (PDF/DOCX/Spec Sheet) using LlamaCloud Document Intelligence."""
-        if not self.llama_api_key:
-            logger.warning("LlamaCloud skipped: LLAMA_CLOUD_API_KEY / LLAMAPARSE_API_KEY not configured.")
-            return None
-        if LlamaParse is None:
-            logger.warning("LlamaCloud skipped: `llama-cloud` / `llama-parse` package not installed.")
-            return None
-
-        try:
-            logger.info("Parsing document via LlamaCloud Document Intelligence: %s", file_path_or_url)
-            parser = LlamaParse(
-                api_key=self.llama_api_key,
-                result_type="markdown",
-                verbose=False,
-            )
-            # Check if input is a local file or remote URL
-            if file_path_or_url.startswith("http://") or file_path_or_url.startswith("https://"):
-                import httpx
-                import tempfile
-                resp = httpx.get(file_path_or_url, timeout=30.0, follow_redirects=True)
-                suffix = ".pdf" if ".pdf" in file_path_or_url.lower() else ".tmp"
-                with tempfile.NamedTemporaryFile(delete=False, suffix=suffix) as tmp:
-                    tmp.write(resp.content)
-                    tmp_path = tmp.name
-                documents = parser.load_data(tmp_path)
-            else:
-                documents = parser.load_data(file_path_or_url)
-
-            text_chunks = [doc.text for doc in documents if hasattr(doc, "text") and doc.text]
-            parsed_text = "\n\n".join(text_chunks)
-            return sanitize_untrusted_text(parsed_text)
-        except Exception as exc:
-            logger.warning("LlamaCloud document intelligence failed for %s: %s", file_path_or_url, exc)
-            return None
-
-    # Backward compatibility alias
-    parse_document_with_llamaparse = parse_document_with_llama_cloud
 
     def scrape(self, url: str) -> ScrapedProductPage:
-        # Check if URL points directly to a PDF/document datasheet
-        if url.lower().endswith(".pdf") or ".pdf?" in url.lower():
-            parsed_doc = self.parse_document_with_llama_cloud(url)
-            if parsed_doc:
-                return ScrapedProductPage(
-                    url=url,
-                    title="PDF Datasheet (Parsed by LlamaCloud)",
-                    description="Industrial PDF Datasheet document parsed via LlamaCloud Document Intelligence",
-                    text=parsed_doc[: self.max_chars],
-                    structured_data=[],
-                    image_urls=[],
-                )
-
         html = self._fetch_html(url)
         return self._parse(url, html)
 
     def scrape_many(self, urls: list[str]) -> list[ScrapedProductPage]:
         if not urls:
             return []
-
-        # Try Playwright with a single browser instance
-        if sync_playwright is not None:
-            try:
-                with sync_playwright() as playwright:
-                    browser = playwright.chromium.launch(headless=True)
-                    page = browser.new_page(
-                        user_agent=(
-                            "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
-                            "AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120 Safari/537.36"
-                        )
-                    )
-                    pages: list[ScrapedProductPage] = []
-                    for url in urls:
-                        try:
-                            page.goto(url, wait_until="domcontentloaded", timeout=self.timeout_ms)
-                            self._best_effort_wait(page)
-                            html = page.content()
-                            pages.append(self._parse(url, html))
-                        except Exception as exc:
-                            logger.warning("Playwright failed for URL %s: %s (falling back to httpx)", url, exc)
-                            html = self._fetch_html_httpx(url)
-                            pages.append(self._parse(url, html))
-                    browser.close()
-                    return pages
-            except Exception as exc:
-                logger.warning("Playwright browser launch failed: %s (using HTTP fallback)", exc)
-
-        # Fallback for all URLs using httpx
         return [self.scrape(url) for url in urls]
 
     def _fetch_html(self, url: str) -> str:
-        if sync_playwright is not None:
-            try:
-                with sync_playwright() as playwright:
-                    browser = playwright.chromium.launch(headless=True)
-                    page = browser.new_page(
-                        user_agent=(
-                            "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
-                            "AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120 Safari/537.36"
-                        )
-                    )
-                    try:
-                        page.goto(url, wait_until="domcontentloaded", timeout=self.timeout_ms)
-                        self._best_effort_wait(page)
-                        return page.content()
-                    finally:
-                        browser.close()
-            except Exception as exc:
-                logger.warning("Playwright scrape failed for %s: %s (using httpx)", url, exc)
-
         return self._fetch_html_httpx(url)
 
     def _fetch_html_httpx(self, url: str) -> str:
         import httpx
         try:
-            headers = {"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) Chrome/120"}
-            resp = httpx.get(url, headers=headers, timeout=self.timeout_ms / 1000, follow_redirects=True)
+            headers = {
+                "User-Agent": (
+                    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+                    "AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
+                ),
+                "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+                "Accept-Language": "en-US,en;q=0.5",
+            }
+            resp = httpx.get(
+                url,
+                headers=headers,
+                timeout=max(self.timeout_ms / 1000, 5.0),
+                follow_redirects=True,
+            )
             return resp.text
         except Exception as exc:
-            logger.warning("HTTP fetch failed for %s: %s", url, exc)
+            logger.debug("HTTP fetch failed for %s: %s", url, exc)
             return f"<html><body><p>Failed to scrape {url}: {exc}</p></body></html>"
 
 

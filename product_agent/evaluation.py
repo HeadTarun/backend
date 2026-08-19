@@ -19,10 +19,7 @@ except ImportError:
 try:
     from langsmith import traceable
 except ImportError:
-    def traceable(*args: Any, **kwargs: Any) -> Any:  # type: ignore[misc]
-        def decorator(func: Any) -> Any:
-            return func
-        return decorator if args and callable(args[0]) else decorator
+    traceable = None  # type: ignore[assignment]
 
 
 PRODUCT_INTELLIGENCE_RUBRICS = {
@@ -74,19 +71,24 @@ class ProductRubricMiddleware(AgentMiddleware):  # type: ignore[misc]
         self.rubrics = rubrics
 
 
+def _traceable(name: str, run_type: str = "chain") -> Any:
+    if traceable is None:
+        def decorator(func: Any) -> Any:
+            return func
+
+        return decorator
+    return traceable(
+        name=name,
+        project_name=get_settings().langsmith_project,
+        metadata={"run_type": run_type},
+    )
+
+
 def configure_langsmith(settings: Settings | None = None) -> None:
-    api_key = (settings and settings.langsmith_api_key) or os.getenv("LANGSMITH_API_KEY")
-    project = (settings and settings.langsmith_project) or os.getenv("LANGSMITH_PROJECT", "industrial-commerce-product-agent")
-    tracing = str(settings.langsmith_tracing).lower() if (settings and settings.langsmith_tracing is not None) else os.getenv("LANGSMITH_TRACING", "true")
-
-    if api_key:
-        os.environ["LANGSMITH_API_KEY"] = api_key
-    os.environ["LANGSMITH_TRACING"] = tracing
-    os.environ["LANGSMITH_PROJECT"] = project
-
-
-# Auto-configure LangSmith credentials from OS environment upon module import
-configure_langsmith()
+    settings = settings or get_settings()
+    if settings.langsmith_tracing:
+        os.environ.setdefault("LANGSMITH_TRACING", "true")
+        os.environ.setdefault("LANGSMITH_PROJECT", settings.langsmith_project)
 
 
 def build_rubric_middleware(settings: Settings | None = None) -> list[Any]:
@@ -112,9 +114,8 @@ def product_intelligence_rubric() -> str:
     return "\n".join(f"- {name}: {criterion}" for name, criterion in PRODUCT_INTELLIGENCE_RUBRICS.items())
 
 
-@traceable(name="product_intelligence_evaluation", run_type="chain")
+@_traceable(name="product_intelligence_evaluation", run_type="chain")
 def evaluate_product_output(product_input: ProductInput, output: ProductIntelligence) -> list[RubricScore]:
-    configure_langsmith()
     scores = [
         RubricScore("completeness", _score_completeness(output), "Checks required commerce fields and review metadata."),
         RubricScore("groundedness", _score_groundedness(product_input, output), "Checks that identifiers and evidence are preserved."),
