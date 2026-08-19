@@ -54,9 +54,11 @@ class ScrapedProductPage:
 
 
 class ProductPageScraper:
-    def __init__(self, *, timeout_ms: int = 8000, max_chars: int = 8000) -> None:
+    def __init__(self, *, timeout_ms: int = 30000, max_chars: int = 8000, max_retries: int = 3) -> None:
+        # Increase default Playwright timeout to 30s and allow a small retry count for HTTP fetches
         self.timeout_ms = timeout_ms
         self.max_chars = max_chars
+        self.max_retries = max_retries
 
     def scrape(self, url: str) -> ScrapedProductPage:
         html = self._fetch_html(url)
@@ -66,8 +68,23 @@ class ProductPageScraper:
         if not urls:
             return []
 
-        # Try Playwright with a single browser instance
-        if sync_playwright is not None:
+        # If any URL looks like a PDF, avoid Playwright and fetch via HTTP
+        pdf_urls = [u for u in urls if u.lower().endswith(".pdf")]
+        non_pdf_urls = [u for u in urls if not u.lower().endswith(".pdf")]
+
+        pages: list[ScrapedProductPage] = []
+
+        # Handle PDFs first via HTTP download/parsing
+        for url in pdf_urls:
+            try:
+                html = self._fetch_pdf_as_html(url)
+                pages.append(self._parse(url, html))
+            except Exception as exc:
+                logger.warning("PDF fetch/parse failed for %s: %s", url, exc)
+                pages.append(ScrapedProductPage(url=url, title=None, description=None, text="", structured_data=[], image_urls=[]))
+
+        # Try Playwright with a single browser instance for non-PDF pages
+        if non_pdf_urls and sync_playwright is not None:
             try:
                 with sync_playwright() as playwright:
                     browser = playwright.chromium.launch(headless=True)
@@ -77,8 +94,7 @@ class ProductPageScraper:
                             "AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120 Safari/537.36"
                         )
                     )
-                    pages: list[ScrapedProductPage] = []
-                    for url in urls:
+                    for url in non_pdf_urls:
                         try:
                             page.goto(url, wait_until="domcontentloaded", timeout=self.timeout_ms)
                             self._best_effort_wait(page)
@@ -93,10 +109,16 @@ class ProductPageScraper:
             except Exception as exc:
                 logger.warning("Playwright browser launch failed: %s (using HTTP fallback)", exc)
 
-        # Fallback for all URLs using httpx
-        return [self.scrape(url) for url in urls]
+        # Fallback for all remaining URLs using httpx
+        for url in non_pdf_urls:
+            pages.append(self.scrape(url))
+        return pages
 
     def _fetch_html(self, url: str) -> str:
+        # If URL looks like a PDF, download and convert to simple HTML text
+        if url.lower().endswith(".pdf"):
+            return self._fetch_pdf_as_html(url)
+
         if sync_playwright is not None:
             try:
                 with sync_playwright() as playwright:
@@ -120,18 +142,60 @@ class ProductPageScraper:
 
     def _fetch_html_httpx(self, url: str) -> str:
         import httpx
-        try:
-            headers = {"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) Chrome/120"}
-            resp = httpx.get(url, headers=headers, timeout=self.timeout_ms / 1000, follow_redirects=True)
-            return resp.text
-        except Exception as exc:
-            logger.warning("HTTP fetch failed for %s: %s", url, exc)
-            return f"<html><body><p>Failed to scrape {url}: {exc}</p></body></html>"
+        headers = {"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) Chrome/120"}
+        last_exc = None
+        for attempt in range(1, max(1, self.max_retries) + 1):
+            try:
+                resp = httpx.get(url, headers=headers, timeout=self.timeout_ms / 1000, follow_redirects=True)
+                # If remote returned a PDF despite URL, handle it
+                ctype = resp.headers.get("content-type", "")
+                if "application/pdf" in ctype.lower() or url.lower().endswith(".pdf"):
+                    return self._fetch_pdf_as_html(url, resp.content)
+                return resp.text
+            except Exception as exc:
+                last_exc = exc
+                logger.warning("HTTP fetch attempt %d failed for %s: %s", attempt, url, exc)
+        logger.warning("HTTP fetch failed for %s after %d attempts: %s", url, self.max_retries, last_exc)
+        return f"<html><body><p>Failed to scrape {url}: {last_exc}</p></body></html>"
 
+    def _fetch_pdf_as_html(self, url: str, content: bytes | None = None) -> str:
+        """Download a PDF (or use provided bytes) and return a simple HTML text representation.
+        Uses pdfplumber if available; otherwise embeds a download link and filename.
+        """
+        try:
+            import io
+            import httpx
+            try:
+                import pdfplumber
+            except Exception:
+                pdfplumber = None
+
+            if content is None:
+                # download the PDF bytes
+                headers = {"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) Chrome/120"}
+                resp = httpx.get(url, headers=headers, timeout=max(10, self.timeout_ms / 1000), follow_redirects=True)
+                content = resp.content
+
+            if pdfplumber:
+                with pdfplumber.open(io.BytesIO(content)) as pdf:
+                    text_parts = []
+                    for p in pdf.pages[:10]:
+                        page_text = p.extract_text() or ""
+                        text_parts.append(page_text)
+                    joined = "\n\n".join(text_parts)
+                    html = f"<html><body><pre>{self._normalize_whitespace(joined)[:20000]}</pre></body></html>"
+                    return html
+            else:
+                # Return a small HTML stub pointing to the PDF bytes (saved externally by caller if desired)
+                return f"<html><body><p>PDF document at {url} (pdfplumber not installed to extract text).</p></body></html>"
+        except Exception as exc:
+            logger.warning("Failed to convert PDF to HTML for %s: %s", url, exc)
+            return f"<html><body><p>Failed to scrape PDF {url}: {exc}</p></body></html>"
 
     def _best_effort_wait(self, page: Any) -> None:
         try:
-            page.wait_for_load_state("networkidle", timeout=min(self.timeout_ms, 5000))
+            # Wait a little longer for network to quiet down; cap at 10s for responsiveness
+            page.wait_for_load_state("networkidle", timeout=min(self.timeout_ms, 10000))
         except PlaywrightTimeoutError:
             pass
 

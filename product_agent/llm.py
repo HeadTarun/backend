@@ -65,6 +65,13 @@ class LiteLLMGatewayChatModel(BaseChatModel):
 
         last_error = None
         for candidate in candidates:
+            # Ensure model identifier is a plain string (avoid ModelMetaclass objects)
+            try:
+                if not isinstance(candidate, str):
+                    candidate = getattr(candidate, "name", str(candidate))
+            except Exception:
+                candidate = str(candidate)
+
             try:
                 logger.info("LiteLLM Gateway trying model candidate: %s", candidate)
                 request: dict[str, Any] = {
@@ -82,6 +89,9 @@ class LiteLLMGatewayChatModel(BaseChatModel):
                     request["stop"] = stop
                 request.update(kwargs)
 
+                # Force model to be a JSON-serializable primitive
+                request["model"] = str(request["model"])
+
                 completion = litellm.completion(**request)
                 choice = completion.choices[0]
                 message = choice.message
@@ -96,6 +106,9 @@ class LiteLLMGatewayChatModel(BaseChatModel):
                 )
             except Exception as exc:
                 last_error = exc
+                # If this candidate looks like a local ollama and connection was refused, log more helpfully
+                if isinstance(exc, Exception) and "Connection refused" in str(exc) and candidate.startswith("ollama"):
+                    logger.warning("Ollama connection refused for candidate %s. Ensure Ollama daemon is running or remove ollama models from config.", candidate)
                 logger.warning("LiteLLM Gateway model '%s' failed: %s", candidate, exc)
                 continue
 
@@ -131,14 +144,15 @@ def build_gateway_chat_model(settings: Settings | None = None) -> LiteLLMGateway
     if settings.gemini_api_key or "GEMINI_API_KEY" in os.environ or "GOOGLE_API_KEY" in os.environ:
         fallbacks.extend([settings.gemini_model, "gemini/gemini-2.0-flash", "gemini/gemini-1.5-flash"])
 
-    # 3. Local Ollama model
-    ollama_tag = settings.ollama_model if settings.ollama_model.startswith("ollama/") else f"ollama/{settings.ollama_model}"
-    fallbacks.append(ollama_tag)
-    fallbacks.append("ollama/qwen3-vl-4b")
-
-    # 4. HuggingFace models
+    # 3. HuggingFace models (try before Ollama since it's more reliable)
     if settings.hf_token or "HUGGINGFACE_API_KEY" in os.environ:
         fallbacks.append(f"huggingface/{settings.hf_vlm_model}")
+
+    # 4. Local Ollama model (only add if a cloud provider is configured as primary fallback)
+    # This avoids constant connection errors when no API key is set
+    if fallbacks:
+        ollama_tag = settings.ollama_model if settings.ollama_model.startswith("ollama/") else f"ollama/{settings.ollama_model}"
+        fallbacks.append(ollama_tag)
 
     # Remove duplicates preserving order
     deduped_candidates: list[str] = []
@@ -146,7 +160,17 @@ def build_gateway_chat_model(settings: Settings | None = None) -> LiteLLMGateway
         if m and m not in deduped_candidates:
             deduped_candidates.append(m)
 
-    primary_model = settings.gateway_model or (deduped_candidates[0] if deduped_candidates else settings.groq_model)
+    if not deduped_candidates:
+        raise RuntimeError(
+            "No LLM providers configured. Please set one of:\n"
+            "  - GROQ_API_KEY (get free at https://console.groq.com/)\n"
+            "  - GEMINI_API_KEY (get free at https://ai.google.dev/)\n"
+            "  - HF_TOKEN (get free at https://huggingface.co/settings/tokens)\n"
+            "  - Start Ollama locally: ollama serve && ollama pull qwen3-vl-4b\n"
+            "See .env.example or README for setup instructions."
+        )
+
+    primary_model = settings.gateway_model or deduped_candidates[0]
     fallback_list = [m for m in deduped_candidates if m != primary_model]
 
     return LiteLLMGatewayChatModel(
