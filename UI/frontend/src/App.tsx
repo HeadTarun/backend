@@ -75,7 +75,8 @@ export type PDFBatchProcessResult = {
   results: BackendProductIntelligence[];
 };
 
-const API_BASE_URL = import.meta.env.VITE_API_URL || 'http://127.0.0.1:8000';
+// VITE_API_URL can override this for local development or a custom API host.
+const API_BASE_URL = import.meta.env.VITE_API_URL || 'https://fackend.vercel.app';
 
 type FormState = {
   mpn: string;
