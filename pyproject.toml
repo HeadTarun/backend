@@ -7,29 +7,32 @@ requires-python = ">=3.12"
 dependencies = [
     "bs4>=0.0.2",
     "fastapi>=0.116.0",
-    "deepagents>=0.7.6",
-    "huggingface>=0.0.1",
-    "huggingface-hub>=0.35.0",
     "httpx>=0.28.0",
-    "langchain>=1.3.15",
-    "langgraph>=1.2.11",
-    "mcp>=2.0.0",
-    "playwright>=1.62.0",
     "pydantic>=2.11.0",
     "python-dotenv>=1.1.0",
-    "streamlit>=1.47.0",
     "supabase>=2.18.0",
-    "uvicorn>=0.35.0",
-    "langsmith>=0.11.0",
-    "ollama>=0.6.2",
-    "langchain-ollama>=1.1.0",
-    "huggingface-hub>=1.27.0",
     "tavily-python>=0.7.27",
-    "litellm>=1.97.0",
-    "pypdf>=6.16.1",
-    "reportlab>=5.0.0",
-    "langchain-groq>=1.1.3",
 ]
 
-[project.scripts]
-app = "product_agent.api:app"
+[project.optional-dependencies]
+# These tools support the local Streamlit UI and experimental agent workflow.
+# They are deliberately excluded from Vercel's production function bundle.
+agent = [
+    "deepagents>=0.7.6",
+    "huggingface-hub>=1.27.0",
+    "langchain>=1.3.15",
+    "langchain-groq>=1.1.3",
+    "langchain-ollama>=1.1.0",
+    "langgraph>=1.2.11",
+    "langsmith>=0.11.0",
+    "litellm>=1.97.0",
+    "mcp>=2.0.0",
+    "ollama>=0.6.2",
+]
+browser = ["playwright>=1.62.0"]
+documents = ["pypdf>=6.16.1", "reportlab>=5.0.0"]
+ui = ["pandas>=2.0.0", "streamlit>=1.47.0", "uvicorn>=0.35.0"]
+
+[tool.uv]
+# This repository is an application, not an installable Python package.
+package = false
