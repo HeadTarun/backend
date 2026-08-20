@@ -1,14 +1,5 @@
 {
-  "builds": [
-    {
-      "src": "product_agent/api.py",
-      "use": "@vercel/python"
-    }
-  ],
-  "routes": [
-    {
-      "src": "/(.*)",
-      "dest": "product_agent/api.py"
-    }
-  ]
+  "$schema": "https://openapi.vercel.sh/vercel.json",
+  "framework": "fastapi",
+  "outputDirectory": null
 }
