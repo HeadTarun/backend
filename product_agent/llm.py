@@ -83,7 +83,7 @@ class LiteLLMGatewayChatModel(BaseChatModel):
                 if self.api_key:
                     request["api_key"] = self.api_key
                 if self.bound_tools:
-                    request["tools"] = self.bound_tools
+                    request["tools"] = self._format_tools_for_litellm(self.bound_tools)
                     request.update(self.tool_kwargs)
                 if stop:
                     request["stop"] = stop
@@ -113,6 +113,41 @@ class LiteLLMGatewayChatModel(BaseChatModel):
                 continue
 
         raise RuntimeError(f"All LiteLLM AI Gateway models failed ({candidates}). Last error: {last_error}")
+
+    @staticmethod
+    def _format_tools_for_litellm(tools: Any) -> Any:
+        if not tools:
+            return None
+        try:
+            from langchain_core.utils.function_calling import convert_to_openai_tool
+            tool_list = tools if isinstance(tools, (list, tuple)) else [tools]
+            formatted = []
+            for t in tool_list:
+                try:
+                    formatted.append(convert_to_openai_tool(t))
+                except Exception:
+                    if hasattr(t, "model_json_schema"):
+                        formatted.append({
+                            "type": "function",
+                            "function": {
+                                "name": getattr(t, "__name__", "structured_output"),
+                                "parameters": t.model_json_schema(),
+                            }
+                        })
+                    elif hasattr(t, "schema"):
+                        formatted.append({
+                            "type": "function",
+                            "function": {
+                                "name": getattr(t, "__name__", "structured_output"),
+                                "parameters": t.schema(),
+                            }
+                        })
+                    else:
+                        formatted.append(t)
+            return formatted
+        except Exception as exc:
+            logger.debug("Tool formatting fallback: %s", exc)
+            return tools
 
     @staticmethod
     def _convert_message(message: BaseMessage) -> dict[str, Any]:

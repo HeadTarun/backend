@@ -4,19 +4,24 @@ import traceback
 import uuid
 from contextlib import asynccontextmanager
 
-from fastapi import FastAPI, HTTPException, Request, status
+from fastapi import FastAPI, File, HTTPException, Request, UploadFile, status
 from fastapi.exception_handlers import http_exception_handler
 from fastapi.exceptions import RequestValidationError
+from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 from pydantic import ValidationError
 
 from product_agent.evaluation import evaluate_product_output
 from product_agent.orchestrator import ProductIntelligenceOrchestrator
+from product_agent.pdf_extractor import extract_products_from_pdf
 from product_agent.schemas import (
     BatchRequest,
     ComponentStatus,
     EvaluationRequest,
     EvaluationScore,
+    ExtractedPDFProductItem,
+    PDFBatchProcessResponse,
+    PDFExtractionResponse,
     ProductInput,
     ProductIntelligence,
 )
@@ -53,6 +58,24 @@ app = FastAPI(
     ),
     version="0.1.0",
     lifespan=lifespan,
+)
+
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=[
+        "http://localhost:3000",
+        "http://127.0.0.1:3000",
+        "http://localhost:5173",
+        "http://127.0.0.1:5173",
+        "http://localhost:5174",
+        "http://127.0.0.1:5174",
+        "http://localhost:4173",
+        "http://127.0.0.1:4173",
+    ],
+    allow_origin_regex=r"https?://(localhost|127\.0\.0\.1)(:\d+)?",
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
 )
 
 orchestrator = ProductIntelligenceOrchestrator()
@@ -312,3 +335,96 @@ def evaluate(request: EvaluationRequest) -> list[EvaluationScore]:
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
             detail="Evaluation failed. The error has been logged.",
         )
+
+
+@app.post(
+    "/upload-pdf-extract",
+    response_model=PDFExtractionResponse,
+    tags=["PDF Document Intelligence"],
+)
+async def upload_pdf_extract(file: UploadFile = File(...)) -> PDFExtractionResponse:
+    """Upload a PDF containing a list of products (BOM, RFQ, catalog) and extract structured product items."""
+    filename = file.filename or "uploaded.pdf"
+    is_pdf = filename.lower().endswith(".pdf") or bool(file.content_type and "pdf" in file.content_type.lower())
+    if not is_pdf:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Only PDF files (.pdf) are supported.",
+        )
+    try:
+        content = await file.read()
+        if len(content) == 0:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail="Uploaded PDF file is empty.",
+            )
+        response = extract_products_from_pdf(content, filename=filename)
+        return response
+    except HTTPException:
+        raise
+    except Exception as exc:
+        logger.exception("Error extracting products from PDF %s", filename)
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=f"Failed to process PDF: {exc}",
+        )
+
+
+@app.post(
+    "/upload-pdf-process",
+    response_model=PDFBatchProcessResponse,
+    tags=["PDF Document Intelligence"],
+)
+async def upload_pdf_process(file: UploadFile = File(...)) -> PDFBatchProcessResponse:
+    """Upload a PDF, extract all products, and immediately run AI Agent batch intelligence enrichment."""
+    filename = file.filename or "uploaded.pdf"
+    is_pdf = filename.lower().endswith(".pdf") or bool(file.content_type and "pdf" in file.content_type.lower())
+    if not is_pdf:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Only PDF files (.pdf) are supported.",
+        )
+    try:
+        content = await file.read()
+        if len(content) == 0:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail="Uploaded PDF file is empty.",
+            )
+        extraction = extract_products_from_pdf(content, filename=file.filename)
+        if not extraction.products:
+            return PDFBatchProcessResponse(
+                filename=file.filename,
+                total_products_found=0,
+                processed_count=0,
+                results=[],
+            )
+
+        # Convert extracted items to ProductInput format
+        product_inputs: list[ProductInput] = []
+        for item in extraction.products[:50]:  # respect batch limit
+            product_inputs.append(
+                ProductInput(
+                    manufacturer_part_number=item.manufacturer_part_number,
+                    brand=item.brand,
+                    short_description=item.short_description or f"Industrial component {item.manufacturer_part_number}",
+                    supporting_text=item.supporting_text,
+                )
+            )
+
+        enriched_results = orchestrator.batch(product_inputs)
+        return PDFBatchProcessResponse(
+            filename=file.filename,
+            total_products_found=extraction.total_products_found,
+            processed_count=len(enriched_results),
+            results=enriched_results,
+        )
+    except HTTPException:
+        raise
+    except Exception as exc:
+        logger.exception("Error processing batch products from PDF %s", file.filename)
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=f"Failed to process PDF batch: {exc}",
+        )
+
