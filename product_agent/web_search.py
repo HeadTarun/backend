@@ -59,19 +59,50 @@ def search_duckduckgo_images(query: str, max_results: int = 5) -> list[str]:
             "User-Agent": (
                 "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
                 "AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
-            )
+            ),
+            # FIX: DuckDuckGo's i.js endpoint checks the Referer header and
+            # will silently serve an empty/HTML anti-bot body (instead of a
+            # normal JSON 4xx) when it's missing or when the vqd token has
+            # gone stale. That empty body is what caused
+            # `img_res.json()` to raise "Expecting value: line 1 column 1".
+            "Referer": "https://duckduckgo.com/",
+            "Accept": "application/json, text/javascript, */*; q=0.01",
+            "X-Requested-With": "XMLHttpRequest",
         }
         with httpx.Client(headers=headers, timeout=6.0, follow_redirects=True) as client:
             res = client.get("https://duckduckgo.com/", params={"q": query})
+            res.raise_for_status()
             vqd_match = re.search(r'vqd=["\']([^"\']+)["\']', res.text) or re.search(r'vqd=([\d-]+)', res.text)
             if not vqd_match:
+                logger.warning("DuckDuckGo image search: could not extract vqd token (page layout may have changed).")
                 return []
             vqd = vqd_match.group(1)
             img_res = client.get(
                 "https://duckduckgo.com/i.js",
                 params={"l": "us-en", "o": "json", "q": query, "vqd": vqd},
+                headers={"Referer": f"https://duckduckgo.com/?q={query}"},
             )
-            data = img_res.json()
+            img_res.raise_for_status()
+
+            # FIX: guard against an empty/non-JSON body (rate-limit or
+            # anti-bot response) before calling .json(), instead of letting
+            # the JSONDecodeError propagate and get swallowed as a generic
+            # "failed: Expecting value..." warning with no results.
+            content_type = img_res.headers.get("content-type", "")
+            if not img_res.content or "json" not in content_type.lower():
+                logger.warning(
+                    "DuckDuckGo image search: non-JSON response (status=%s, content-type=%s); likely rate-limited.",
+                    img_res.status_code,
+                    content_type,
+                )
+                return []
+
+            try:
+                data = img_res.json()
+            except ValueError:
+                logger.warning("DuckDuckGo image search: response body was not valid JSON; skipping.")
+                return []
+
             results = data.get("results", [])
             images: list[str] = []
             for r in results:

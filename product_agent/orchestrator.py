@@ -55,16 +55,16 @@ class ProductIntelligenceOrchestrator:
             settings.supabase_key,
             settings.supabase_products_table,
         )
+
         from product_agent.web_search import ProductWebSearcher
+        from product_agent.evaluation import configure_langsmith
+        configure_langsmith(settings)
 
         self.scraper = scraper or ProductPageScraper()
         searcher = ProductWebSearcher(settings.tavily_api_key, settings.tavily_max_results) if settings.tavily_api_key else None
         self.tools = tools or AgentTools(self.store, scraper=self.scraper, searcher=searcher)
         self.middleware = build_pii_middleware()
-        # Lazily-built deep agents; HF is tried first, Ollama is the fallback.
-        self._hf_agent = agent      # can be injected for testing
-        self._ollama_agent: Any = None
-
+        self._agent = agent
 
     def process_product(self, product: ProductInput) -> ProductIntelligence:
         # Step 1: Scrape URLs / web-search, collect text AND product images
@@ -79,14 +79,8 @@ class ProductIntelligenceOrchestrator:
             logger.warning("Similar products lookup failed for MPN=%s: %s", product.manufacturer_part_number, exc)
             matches = []
 
-        # Step 3: generate structured intelligence using LLM deep agent
-        agent_result = self._run_deep_agent(clean_input)
-        structured = agent_result if agent_result is not None else self._build_baseline_product(
-            clean_input, matches, image_urls=extracted_images
-        )
-
-        if agent_result is None:
-            logger.warning("Both LLMs unavailable; using regex baseline for MPN=%s", product.manufacturer_part_number)
+        # Step 3: generate structured intelligence using the deterministic regex baseline
+        structured = self._build_baseline_product(clean_input, matches, image_urls=extracted_images)
 
         if getattr(product, "custom_image_url", None):
             custom_img = product.custom_image_url.strip()
@@ -154,106 +148,6 @@ class ProductIntelligenceOrchestrator:
             return structured
 
 
-    def _run_deep_agent(self, product: ProductInput) -> ProductIntelligence | None:
-        """Invoke the deep agent with HuggingFace first, Ollama as fallback.
-
-        Returns None when both LLMs fail, triggering the regex baseline.
-        """
-        try:
-            from product_agent.deep_agent import create_product_deep_agent, deep_agent_input
-        except Exception as exc:  # pragma: no cover
-            logger.warning("Could not import deep_agent: %s", exc)
-            return None
-
-        try:
-            agent_in = deep_agent_input(product)
-        except Exception as exc:
-            logger.warning("Could not build deep agent input: %s", exc)
-            return None
-
-        # ----- Try each LLM backend in order -----
-        for label, getter in [
-            ("HuggingFace", self._get_hf_agent),
-            ("Ollama",      self._get_ollama_agent),
-        ]:
-            agent = getter(create_product_deep_agent)
-            if agent is None:
-                continue
-            result = self._invoke_agent(agent, agent_in, label)
-            if result is not None:
-                return result
-
-        return None
-
-    # ------------------------------------------------------------------
-    # Agent builder helpers
-    # ------------------------------------------------------------------
-
-    def _get_hf_agent(self, factory: Any) -> Any | None:
-        """Lazily build and cache the LiteLLM gateway deep agent (Groq / Gemini)."""
-        if self._hf_agent is not None:
-            return self._hf_agent
-        try:
-            from product_agent.llm import build_gateway_chat_model
-            model = build_gateway_chat_model(self._settings)
-            self._hf_agent = factory(
-                settings=self._settings,
-                store=self.store,
-                tools=self.tools,
-                scraper=self.scraper,
-                model=model,
-            )
-            logger.info("Deep agent: using LiteLLM AI Gateway (Groq/Gemini).")
-            return self._hf_agent
-        except Exception as exc:
-            logger.warning("Could not build LiteLLM gateway deep agent: %s", exc)
-            return None
-
-    def _get_ollama_agent(self, factory: Any) -> Any | None:
-        """Lazily build and cache the Ollama-backed deep agent (local fallback)."""
-        if self._ollama_agent is not None:
-            return self._ollama_agent
-        try:
-            from product_agent.llm import build_ollama_qwen_model
-            model = build_ollama_qwen_model(self._settings)
-            self._ollama_agent = factory(
-                settings=self._settings,
-                store=self.store,
-                tools=self.tools,
-                scraper=self.scraper,
-                model=model,
-            )
-            logger.info("Deep agent: falling back to local Ollama Qwen3.")
-            return self._ollama_agent
-        except Exception as exc:
-            logger.warning("Could not build Ollama deep agent: %s", exc)
-            return None
-
-    def _invoke_agent(self, agent: Any, agent_in: dict, label: str) -> ProductIntelligence | None:
-        """Call agent.invoke() and parse the last AI message as ProductIntelligence JSON."""
-        try:
-            result = agent.invoke(agent_in)
-            messages = result.get("messages", [])
-            for msg in reversed(messages):
-                content = getattr(msg, "content", None) or (
-                    msg.get("content") if isinstance(msg, dict) else None
-                )
-                if not content:
-                    continue
-                # Strip markdown code fences the model may have added
-                text = content.strip()
-                if text.startswith("```"):
-                    text = re.sub(r"^```[a-z]*\n?", "", text)
-                    text = re.sub(r"\n?```$", "", text.strip())
-                try:
-                    return ProductIntelligence.model_validate_json(text)
-                except Exception:
-                    continue
-            logger.warning("%s agent returned no parseable ProductIntelligence message.", label)
-            return None
-        except Exception as exc:
-            logger.warning("%s agent invocation failed: %s", label, exc)
-            return None
 
     def _collect_sources(self, product: ProductInput) -> tuple[str | None, list[str]]:
         chunks: list[str] = []
@@ -263,7 +157,7 @@ class ProductIntelligenceOrchestrator:
         image_urls: list[str] = []
         urls_to_scrape = [str(u) for u in product.supporting_urls]
 
-        # If user gave no URLs, try Tavily web search to discover them
+        # If user gave no URLs, try Tavily web search to discover them (only if web searcher available)
         if not urls_to_scrape and self.tools.searcher:
             try:
                 search_res = self.tools.searcher.search_product(
@@ -305,8 +199,8 @@ class ProductIntelligenceOrchestrator:
             except Exception as exc:
                 logger.warning("Scraping failed: %s", exc)
 
-        # Guaranteed direct web image search fallback if no images were extracted yet
-        if not image_urls:
+        # Web image search fallback ONLY if URLs were provided or Tavily was active, but scraping yielded no images
+        if not image_urls and (product.supporting_urls or self.tools.searcher):
             try:
                 from product_agent.web_search import search_duckduckgo_images
                 ddg_imgs = search_duckduckgo_images(f"{product.brand} {product.manufacturer_part_number} product", max_results=5)

@@ -62,16 +62,9 @@ class LiteLLMGatewayChatModel(BaseChatModel):
 
         formatted_messages = [self._convert_message(m) for m in messages]
         candidates = [self.model, *[m for m in self.fallback_models if m != self.model]]
-
+  
         last_error = None
         for candidate in candidates:
-            # Ensure model identifier is a plain string (avoid ModelMetaclass objects)
-            try:
-                if not isinstance(candidate, str):
-                    candidate = getattr(candidate, "name", str(candidate))
-            except Exception:
-                candidate = str(candidate)
-
             try:
                 logger.info("LiteLLM Gateway trying model candidate: %s", candidate)
                 request: dict[str, Any] = {
@@ -83,14 +76,11 @@ class LiteLLMGatewayChatModel(BaseChatModel):
                 if self.api_key:
                     request["api_key"] = self.api_key
                 if self.bound_tools:
-                    request["tools"] = self._format_tools_for_litellm(self.bound_tools)
+                    request["tools"] = self.bound_tools
                     request.update(self.tool_kwargs)
                 if stop:
                     request["stop"] = stop
                 request.update(kwargs)
-
-                # Force model to be a JSON-serializable primitive
-                request["model"] = str(request["model"])
 
                 completion = litellm.completion(**request)
                 choice = completion.choices[0]
@@ -106,48 +96,10 @@ class LiteLLMGatewayChatModel(BaseChatModel):
                 )
             except Exception as exc:
                 last_error = exc
-                # If this candidate looks like a local ollama and connection was refused, log more helpfully
-                if isinstance(exc, Exception) and "Connection refused" in str(exc) and candidate.startswith("ollama"):
-                    logger.warning("Ollama connection refused for candidate %s. Ensure Ollama daemon is running or remove ollama models from config.", candidate)
                 logger.warning("LiteLLM Gateway model '%s' failed: %s", candidate, exc)
                 continue
 
         raise RuntimeError(f"All LiteLLM AI Gateway models failed ({candidates}). Last error: {last_error}")
-
-    @staticmethod
-    def _format_tools_for_litellm(tools: Any) -> Any:
-        if not tools:
-            return None
-        try:
-            from langchain_core.utils.function_calling import convert_to_openai_tool
-            tool_list = tools if isinstance(tools, (list, tuple)) else [tools]
-            formatted = []
-            for t in tool_list:
-                try:
-                    formatted.append(convert_to_openai_tool(t))
-                except Exception:
-                    if hasattr(t, "model_json_schema"):
-                        formatted.append({
-                            "type": "function",
-                            "function": {
-                                "name": getattr(t, "__name__", "structured_output"),
-                                "parameters": t.model_json_schema(),
-                            }
-                        })
-                    elif hasattr(t, "schema"):
-                        formatted.append({
-                            "type": "function",
-                            "function": {
-                                "name": getattr(t, "__name__", "structured_output"),
-                                "parameters": t.schema(),
-                            }
-                        })
-                    else:
-                        formatted.append(t)
-            return formatted
-        except Exception as exc:
-            logger.debug("Tool formatting fallback: %s", exc)
-            return tools
 
     @staticmethod
     def _convert_message(message: BaseMessage) -> dict[str, Any]:
@@ -179,15 +131,14 @@ def build_gateway_chat_model(settings: Settings | None = None) -> LiteLLMGateway
     if settings.gemini_api_key or "GEMINI_API_KEY" in os.environ or "GOOGLE_API_KEY" in os.environ:
         fallbacks.extend([settings.gemini_model, "gemini/gemini-2.0-flash", "gemini/gemini-1.5-flash"])
 
-    # 3. HuggingFace models (try before Ollama since it's more reliable)
+    # 3. Local Ollama model
+    ollama_tag = settings.ollama_model if settings.ollama_model.startswith("ollama/") else f"ollama/{settings.ollama_model}"
+    fallbacks.append(ollama_tag)
+    fallbacks.append("ollama/qwen3-vl-4b")
+
+    # 4. HuggingFace models
     if settings.hf_token or "HUGGINGFACE_API_KEY" in os.environ:
         fallbacks.append(f"huggingface/{settings.hf_vlm_model}")
-
-    # 4. Local Ollama model (only add if a cloud provider is configured as primary fallback)
-    # This avoids constant connection errors when no API key is set
-    if fallbacks:
-        ollama_tag = settings.ollama_model if settings.ollama_model.startswith("ollama/") else f"ollama/{settings.ollama_model}"
-        fallbacks.append(ollama_tag)
 
     # Remove duplicates preserving order
     deduped_candidates: list[str] = []
@@ -195,17 +146,7 @@ def build_gateway_chat_model(settings: Settings | None = None) -> LiteLLMGateway
         if m and m not in deduped_candidates:
             deduped_candidates.append(m)
 
-    if not deduped_candidates:
-        raise RuntimeError(
-            "No LLM providers configured. Please set one of:\n"
-            "  - GROQ_API_KEY (get free at https://console.groq.com/)\n"
-            "  - GEMINI_API_KEY (get free at https://ai.google.dev/)\n"
-            "  - HF_TOKEN (get free at https://huggingface.co/settings/tokens)\n"
-            "  - Start Ollama locally: ollama serve && ollama pull qwen3-vl-4b\n"
-            "See .env.example or README for setup instructions."
-        )
-
-    primary_model = settings.gateway_model or deduped_candidates[0]
+    primary_model = settings.gateway_model or (deduped_candidates[0] if deduped_candidates else settings.groq_model)
     fallback_list = [m for m in deduped_candidates if m != primary_model]
 
     return LiteLLMGatewayChatModel(
@@ -216,16 +157,26 @@ def build_gateway_chat_model(settings: Settings | None = None) -> LiteLLMGateway
     )
 
 
-# Backward compatibility helpers
+# Backward compatibility & provider-specific helpers
 try:
     from huggingface_hub import InferenceClient
 except ImportError:
     InferenceClient = None
 
 
-def build_qwen_vl_chat_model(settings: Settings | None = None) -> Any:
+def build_qwen_vl_chat_model(settings: Settings | None = None) -> LiteLLMGatewayChatModel:
+    """Build AI Gateway model (alias for backward compatibility)."""
     return build_gateway_chat_model(settings)
 
 
-def build_ollama_qwen_model(settings: Settings | None = None) -> Any:
-    return build_gateway_chat_model(settings)
+def build_ollama_qwen_model(settings: Settings | None = None) -> LiteLLMGatewayChatModel:
+    """Build a dedicated local Ollama chat model with AI Gateway fallback."""
+    settings = settings or get_settings()
+    ollama_tag = settings.ollama_model if settings.ollama_model.startswith("ollama/") else f"ollama/{settings.ollama_model}"
+    return LiteLLMGatewayChatModel(
+        model=ollama_tag,
+        fallback_models=["ollama/qwen3-vl-4b", "ollama/qwen2.5-coder:7b"],
+        temperature=settings.hf_temperature,
+        max_tokens=settings.hf_max_new_tokens,
+    )
+

@@ -76,28 +76,3 @@ class EvaluationScore(BaseModel):
     key: str
     score: float
     comment: str
-
-
-class ExtractedPDFProductItem(BaseModel):
-    manufacturer_part_number: str = Field(min_length=1)
-    brand: str = Field(min_length=1, default="Generic / Unspecified")
-    short_description: str = Field(min_length=1, default="")
-    quantity: int | None = Field(default=None, description="Quantity or item count if specified in BOM/list")
-    category: str | None = Field(default=None, description="Product category if detected")
-    supporting_text: str | None = Field(default=None, description="Extracted line specs or notes")
-
-
-class PDFExtractionResponse(BaseModel):
-    filename: str
-    total_products_found: int
-    raw_text_length: int
-    products: list[ExtractedPDFProductItem] = Field(default_factory=list)
-    warnings: list[str] = Field(default_factory=list)
-
-
-class PDFBatchProcessResponse(BaseModel):
-    filename: str
-    total_products_found: int
-    processed_count: int
-    results: list[ProductIntelligence] = Field(default_factory=list)
-

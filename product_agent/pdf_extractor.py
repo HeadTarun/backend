@@ -1,13 +1,9 @@
 import io
-import json
 import logging
 import re
-from typing import Any
 
 import pypdf
-from langchain_core.messages import SystemMessage, HumanMessage
 
-from product_agent.llm import build_gateway_chat_model
 from product_agent.schemas import ExtractedPDFProductItem, PDFExtractionResponse
 
 logger = logging.getLogger(__name__)
@@ -106,87 +102,6 @@ def parse_products_with_heuristics(raw_text: str) -> list[ExtractedPDFProductIte
     return items
 
 
-def parse_products_with_llm(raw_text: str) -> list[ExtractedPDFProductItem] | None:
-    """Use AI Gateway / LLM to accurately extract structured product list from PDF text."""
-    try:
-        chat_model = build_gateway_chat_model()
-        truncated_text = raw_text[:12000]
-
-        system_msg = SystemMessage(
-            content=(
-                "You are an industrial product intelligence AI specialized in extracting product lists, "
-                "Bills of Materials (BOM), Request for Quotes (RFQs), purchase orders, equipment schedules, and catalogs from PDF documents.\n"
-                "Extract every unique industrial product mentioned in the document.\n"
-                "Return STRICTLY valid JSON without conversational text or markdown explanation, in this exact schema:\n"
-                "{\n"
-                '  "products": [\n'
-                "    {\n"
-                '      "manufacturer_part_number": "exact part number / MPN",\n'
-                '      "brand": "Manufacturer or Brand name (e.g. Festo, Schneider Electric, Siemens)",\n'
-                '      "short_description": "Precise product description, specs, or dimensions",\n'
-                '      "quantity": 10,\n'
-                '      "category": "e.g. Sensors, Pneumatics, Motors, Bearings",\n'
-                '      "supporting_text": "Relevant line context or raw spec notes from the PDF"\n'
-                "    }\n"
-                "  ]\n"
-                "}"
-            )
-        )
-        user_msg = HumanMessage(
-            content=f"Extract all industrial products from the following PDF document text:\n\n{truncated_text}"
-        )
-
-        response = chat_model.invoke([system_msg, user_msg])
-        content = response.content if hasattr(response, "content") else str(response)
-
-        # Clean JSON markdown blocks
-        cleaned = re.sub(r"```(?:json)?", "", content).strip()
-        json_match = re.search(r"\{[\s\S]*\}", cleaned)
-        if json_match:
-            cleaned = json_match.group(0)
-
-        data = json.loads(cleaned)
-        raw_items = data.get("products", [])
-        if not raw_items and isinstance(data, list):
-            raw_items = data
-
-        extracted: list[ExtractedPDFProductItem] = []
-        for item in raw_items:
-            if not isinstance(item, dict):
-                continue
-            mpn = str(item.get("manufacturer_part_number") or item.get("mpn") or "").strip()
-            if not mpn:
-                continue
-            brand = str(item.get("brand") or item.get("manufacturer") or "Generic / Unspecified").strip()
-            desc = str(item.get("short_description") or item.get("description") or f"Industrial part {mpn}").strip()
-            qty = item.get("quantity")
-            if qty is not None:
-                try:
-                    qty = int(qty)
-                except (ValueError, TypeError):
-                    qty = None
-            category = item.get("category")
-            supp = item.get("supporting_text")
-
-            extracted.append(
-                ExtractedPDFProductItem(
-                    manufacturer_part_number=mpn,
-                    brand=brand,
-                    short_description=desc,
-                    quantity=qty,
-                    category=category,
-                    supporting_text=supp,
-                )
-            )
-
-        if extracted:
-            return extracted
-    except Exception as exc:
-        logger.warning("LLM PDF product extraction failed, falling back to heuristics: %s", exc)
-
-    return None
-
-
 def extract_products_from_pdf(pdf_bytes: bytes, filename: str = "document.pdf") -> PDFExtractionResponse:
     """End-to-end extraction: reads PDF, parses text, and extracts structured product list."""
     warnings: list[str] = []
@@ -211,13 +126,11 @@ def extract_products_from_pdf(pdf_bytes: bytes, filename: str = "document.pdf") 
             warnings=["No readable text found in PDF. It may be a scanned image or empty."],
         )
 
-    products = parse_products_with_llm(raw_text)
-    if not products:
-        products = parse_products_with_heuristics(raw_text)
-        if products:
-            warnings.append("Parsed products using rule-based table extractor (LLM unavailable or returned empty).")
-        else:
-            warnings.append("No industrial part numbers or product items could be recognized in the document.")
+    products = parse_products_with_heuristics(raw_text)
+    if products:
+        warnings.append("Parsed products using the rule-based table extractor.")
+    else:
+        warnings.append("No industrial part numbers or product items could be recognized in the document.")
 
     return PDFExtractionResponse(
         filename=filename,
