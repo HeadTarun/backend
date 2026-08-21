@@ -104,6 +104,68 @@ def dedupe_normalized_attributes(norm_attrs: dict) -> dict:
         result[k] = v
     return result
 
+
+# ---------------------------------------------------------------------------
+# OPTIONAL AI POLISH (Groq)
+# The regex helpers above catch obvious junk cheaply and for free. Some noise
+# survives because it's made of real words in a nonsense pairing (e.g. a spec
+# named "Standard general" with value "purpose configuration") — a regex
+# can't tell that's broken, but an LLM can. This is an OPTIONAL second pass:
+# it only runs if the user turns it on and provides a Groq API key, and it
+# always falls back to the regex-cleaned data if the call fails for any reason.
+# ---------------------------------------------------------------------------
+
+GROQ_MODEL = "llama-3.3-70b-versatile"
+
+GROQ_SYSTEM_PROMPT = (
+    "You are a technical catalog editor for an industrial parts commerce site. "
+    "You will receive product data that has already had obvious junk removed, "
+    "but may still contain sentence fragments, near-duplicates, or entries that "
+    "aren't genuine technical specifications (brand mentions, image captions, "
+    "incomplete phrases). Return ONLY valid JSON with this exact shape, no "
+    "other text: "
+    '{"description": string, '
+    '"specifications": [{"name": string, "value": string, "unit": string|null}], '
+    '"features": [string], "applications": [string]}. '
+    "Rules: rewrite description as 1-2 clear sentences a buyer would actually "
+    "read. Drop any specification that is not a genuine, complete technical "
+    "attribute. Merge duplicate or near-duplicate specifications. Keep at most "
+    "6 features, each a real, complete capability statement. Never invent "
+    "values that are not present in the input — only clean up and reorganize "
+    "what's given."
+)
+
+
+@st.cache_data(show_spinner=False, ttl=3600)
+def polish_with_groq(payload_json: str, api_key: str):
+    """Send pre-cleaned product data to Groq for a final readability pass.
+    Returns a dict on success, or None on any failure (caller falls back to
+    the regex-cleaned data). Cached so re-rendering the same product doesn't
+    re-call the API."""
+    try:
+        resp = httpx.post(
+            "https://api.groq.com/openai/v1/chat/completions",
+            headers={"Authorization": f"Bearer {api_key}", "Content-Type": "application/json"},
+            json={
+                "model": GROQ_MODEL,
+                "messages": [
+                    {"role": "system", "content": GROQ_SYSTEM_PROMPT},
+                    {"role": "user", "content": payload_json},
+                ],
+                "temperature": 0.2,
+                "response_format": {"type": "json_object"},
+            },
+            timeout=20,
+        )
+        resp.raise_for_status()
+        content = resp.json()["choices"][0]["message"]["content"]
+        parsed = json.loads(content)
+        if not isinstance(parsed, dict):
+            return None
+        return parsed
+    except Exception:
+        return None
+
 st.set_page_config(
     page_title="Product Intelligence Assistant",
     page_icon="⚙️",
@@ -199,6 +261,24 @@ with st.sidebar:
     )
 
     st.markdown("---")
+    st.markdown("### ✨ AI Text Polish")
+    enable_ai_polish = st.toggle(
+        "Enable AI polish (Groq)",
+        value=False,
+        help="Runs an extra, fast pass over the cleaned data to tighten wording and drop any remaining odd entries.",
+    )
+    groq_api_key = None
+    if enable_ai_polish:
+        groq_api_key = st.text_input(
+            "Groq API Key",
+            type="password",
+            value=st.secrets.get("GROQ_API_KEY", "") if hasattr(st, "secrets") else "",
+            help="Free key from console.groq.com. Not stored — used only for this session.",
+        )
+        if not groq_api_key:
+            st.caption("⚠️ Add a Groq API key above to use AI polish.")
+
+    st.markdown("---")
     if st.button("🔄 Start Over", use_container_width=True):
         for key in ("mpn", "brand", "desc", "pdf_extracted_data", "pdf_batch_results"):
             st.session_state.pop(key, None)
@@ -280,6 +360,46 @@ with main_tab1:
                 result = response.json()
                 st.success("✅ Product Listing Generated Successfully!")
 
+                # --- Regex cleanup pass (free, instant) -------------------------------
+                real_specs, source_mentions = clean_specifications(result.get("specifications", []), result.get("brand", ""))
+                clean_feats = clean_features(result.get("key_features", []))
+                clean_apps = [str(a).strip() for a in result.get("applications", []) if str(a).strip()]
+                clean_desc = clean_description(result.get("commerce_description"))
+                ai_polished = False
+
+                # --- Optional Groq polish pass -----------------------------------------
+                if enable_ai_polish and groq_api_key:
+                    with st.spinner("✨ Polishing text with AI..."):
+                        polish_input = {
+                            "description": clean_desc,
+                            "specifications": [
+                                {"name": s["name"], "value": s["value"], "unit": s["unit"]} for s in real_specs
+                            ],
+                            "features": clean_feats,
+                            "applications": clean_apps,
+                        }
+                        polished = polish_with_groq(json.dumps(polish_input, ensure_ascii=False), groq_api_key)
+
+                    if polished:
+                        clean_desc = polished.get("description", clean_desc)
+                        clean_feats = polished.get("features", clean_feats) or clean_feats
+                        clean_apps = polished.get("applications", clean_apps) or clean_apps
+                        polished_specs = polished.get("specifications")
+                        if polished_specs:
+                            real_specs = [
+                                {
+                                    "name": s.get("name", ""),
+                                    "value": s.get("value", ""),
+                                    "unit": s.get("unit"),
+                                    "source": "extracted_spec",
+                                }
+                                for s in polished_specs
+                                if s.get("name") and s.get("value")
+                            ]
+                        ai_polished = True
+                    else:
+                        st.caption("⚠️ AI polish couldn't complete — showing the standard cleaned version instead.")
+
                 # Top Overview Header
                 st.markdown("---")
                 col_img, col_info = st.columns([1, 2])
@@ -309,8 +429,11 @@ with main_tab1:
                     st.markdown(f"### {result.get('title')}")
                     conf = str(result.get("confidence", "medium")).lower()
                     conf_color = {"high": "🟢", "medium": "🟡", "low": "🟠"}.get(conf, "⚪")
-                    st.markdown(f"**MPN:** `{result.get('manufacturer_part_number')}` &nbsp;|&nbsp; **Brand:** `{result.get('brand')}` &nbsp;|&nbsp; **Confidence:** {conf_color} {conf.title()}")
-                    st.write(clean_description(result.get("commerce_description")))
+                    badge_line = f"**MPN:** `{result.get('manufacturer_part_number')}` &nbsp;|&nbsp; **Brand:** `{result.get('brand')}` &nbsp;|&nbsp; **Confidence:** {conf_color} {conf.title()}"
+                    if ai_polished:
+                        badge_line += " &nbsp;|&nbsp; ✨ *AI polished*"
+                    st.markdown(badge_line)
+                    st.write(clean_desc)
 
                 # Tabs for structured data
                 tab_specs, tab_features, tab_norm, tab_evidence = st.tabs(
@@ -331,7 +454,8 @@ with main_tab1:
                         "normalized": "Catalog Normalized",
                     }
 
-                    real_specs, source_mentions = clean_specifications(specs, result.get("brand", ""))
+                    # real_specs / source_mentions were already computed above (and
+                    # possibly AI-polished) before this tab renders.
                     filtered_count = len(specs) - len(real_specs) - len(source_mentions)
 
                     cleaned_specs = []
@@ -339,7 +463,7 @@ with main_tab1:
                         s_name = spec["name"]
                         s_val = spec["value"]
                         s_unit = spec["unit"]
-                        raw_src = spec["source"]
+                        raw_src = spec.get("source", "extracted_spec")
 
                         unit_display = str(s_unit).strip() if s_unit and str(s_unit).strip() not in ("None", "nan") else "-"
                         source_display = source_labels.get(raw_src, raw_src.replace("_", " ").title())
@@ -356,6 +480,8 @@ with main_tab1:
                             f"ℹ️ {filtered_count + len(source_mentions)} low-value or duplicate entries "
                             f"were filtered out to keep this list clean and trustworthy."
                         )
+                    if ai_polished:
+                        st.caption("✨ This list was also reviewed and tightened by AI.")
 
                     card_keywords = [
                         "voltage", "current", "power", "frequency", "temperature",
@@ -415,17 +541,15 @@ with main_tab1:
                     col_feat, col_app = st.columns(2)
                     with col_feat:
                         st.markdown("#### Key Features")
-                        feats = clean_features(result.get("key_features", []))
-                        if feats:
-                            for feat in feats:
+                        if clean_feats:
+                            for feat in clean_feats:
                                 st.markdown(f"- {feat}")
                         else:
                             st.caption("No clean feature bullets were extracted for this product.")
                     with col_app:
                         st.markdown("#### Target Applications")
-                        apps = [str(a).strip() for a in result.get("applications", []) if str(a).strip()]
-                        if apps:
-                            for app in apps:
+                        if clean_apps:
+                            for app in clean_apps:
                                 st.markdown(f"- 🛠️ {app}")
                         else:
                             st.caption("No target applications identified.")
