@@ -231,6 +231,13 @@ st.markdown(
 
 MAX_PDF_SIZE_MB = 20
 
+# AI polish runs automatically in the background whenever a Groq key is
+# configured in secrets — the client never sees a toggle, key field, or any
+# indication of whether a listing was AI-polished or fell back to the
+# regex-cleaned version. It's invisible either way.
+GROQ_API_KEY = st.secrets.get("GROQ_API_KEY", "") if hasattr(st, "secrets") else ""
+AI_POLISH_ENABLED = bool(GROQ_API_KEY)
+
 st.markdown('<div class="main-title">Product Intelligence Assistant</div>', unsafe_allow_html=True)
 st.markdown(
     '<div class="sub-title">Turn a part number, description, or product list into a ready-to-publish catalog entry</div>',
@@ -259,24 +266,6 @@ with st.sidebar:
         "Provide a part number and description (and optionally a product link), "
         "and the assistant will research, structure, and enrich the listing for you."
     )
-
-    st.markdown("---")
-    st.markdown("### ✨ AI Text Polish")
-    enable_ai_polish = st.toggle(
-        "Enable AI polish (Groq)",
-        value=False,
-        help="Runs an extra, fast pass over the cleaned data to tighten wording and drop any remaining odd entries.",
-    )
-    groq_api_key = None
-    if enable_ai_polish:
-        groq_api_key = st.text_input(
-            "Groq API Key",
-            type="password",
-            value=st.secrets.get("GROQ_API_KEY", "") if hasattr(st, "secrets") else "",
-            help="Free key from console.groq.com. Not stored — used only for this session.",
-        )
-        if not groq_api_key:
-            st.caption("⚠️ Add a Groq API key above to use AI polish.")
 
     st.markdown("---")
     if st.button("🔄 Start Over", use_container_width=True):
@@ -360,16 +349,15 @@ with main_tab1:
                 result = response.json()
                 st.success("✅ Product Listing Generated Successfully!")
 
-                # --- Regex cleanup pass (free, instant) -------------------------------
+                # --- Regex cleanup pass (free, instant, always runs as the safety net) ---
                 real_specs, source_mentions = clean_specifications(result.get("specifications", []), result.get("brand", ""))
                 clean_feats = clean_features(result.get("key_features", []))
                 clean_apps = [str(a).strip() for a in result.get("applications", []) if str(a).strip()]
                 clean_desc = clean_description(result.get("commerce_description"))
-                ai_polished = False
 
-                # --- Optional Groq polish pass -----------------------------------------
-                if enable_ai_polish and groq_api_key:
-                    with st.spinner("✨ Polishing text with AI..."):
+                # --- AI polish pass (primary path when configured; silent fallback otherwise) ---
+                if AI_POLISH_ENABLED:
+                    with st.spinner("🤖 Researching the product and building your listing..."):
                         polish_input = {
                             "description": clean_desc,
                             "specifications": [
@@ -378,7 +366,7 @@ with main_tab1:
                             "features": clean_feats,
                             "applications": clean_apps,
                         }
-                        polished = polish_with_groq(json.dumps(polish_input, ensure_ascii=False), groq_api_key)
+                        polished = polish_with_groq(json.dumps(polish_input, ensure_ascii=False), GROQ_API_KEY)
 
                     if polished:
                         clean_desc = polished.get("description", clean_desc)
@@ -396,9 +384,9 @@ with main_tab1:
                                 for s in polished_specs
                                 if s.get("name") and s.get("value")
                             ]
-                        ai_polished = True
-                    else:
-                        st.caption("⚠️ AI polish couldn't complete — showing the standard cleaned version instead.")
+                    # If polish_with_groq returned None, real_specs/clean_feats/clean_apps/
+                    # clean_desc simply keep their regex-cleaned values — no error, no
+                    # indication to the client that anything different happened.
 
                 # Top Overview Header
                 st.markdown("---")
@@ -429,10 +417,7 @@ with main_tab1:
                     st.markdown(f"### {result.get('title')}")
                     conf = str(result.get("confidence", "medium")).lower()
                     conf_color = {"high": "🟢", "medium": "🟡", "low": "🟠"}.get(conf, "⚪")
-                    badge_line = f"**MPN:** `{result.get('manufacturer_part_number')}` &nbsp;|&nbsp; **Brand:** `{result.get('brand')}` &nbsp;|&nbsp; **Confidence:** {conf_color} {conf.title()}"
-                    if ai_polished:
-                        badge_line += " &nbsp;|&nbsp; ✨ *AI polished*"
-                    st.markdown(badge_line)
+                    st.markdown(f"**MPN:** `{result.get('manufacturer_part_number')}` &nbsp;|&nbsp; **Brand:** `{result.get('brand')}` &nbsp;|&nbsp; **Confidence:** {conf_color} {conf.title()}")
                     st.write(clean_desc)
 
                 # Tabs for structured data
@@ -456,7 +441,7 @@ with main_tab1:
 
                     # real_specs / source_mentions were already computed above (and
                     # possibly AI-polished) before this tab renders.
-                    filtered_count = len(specs) - len(real_specs) - len(source_mentions)
+                    filtered_count = max(0, len(specs) - len(real_specs) - len(source_mentions))
 
                     cleaned_specs = []
                     for spec in real_specs:
@@ -480,8 +465,6 @@ with main_tab1:
                             f"ℹ️ {filtered_count + len(source_mentions)} low-value or duplicate entries "
                             f"were filtered out to keep this list clean and trustworthy."
                         )
-                    if ai_polished:
-                        st.caption("✨ This list was also reviewed and tightened by AI.")
 
                     card_keywords = [
                         "voltage", "current", "power", "frequency", "temperature",
