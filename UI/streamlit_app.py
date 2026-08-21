@@ -1,13 +1,13 @@
-import io
 import json
 import httpx
 import pandas as pd
 import streamlit as st
 
-API_URL = "http://127.0.0.1:8000"
+# Fixed backend endpoint (not exposed/editable by the client)
+API_URL = "https://fackend.vercel.app"
 
 st.set_page_config(
-    page_title="Industrial Product AI Agent",
+    page_title="Product Intelligence Assistant",
     page_icon="⚙️",
     layout="wide",
     initial_sidebar_state="expanded",
@@ -54,40 +54,66 @@ st.markdown(
         text-align: center;
         border: 1px solid #CBD5E1;
     }
+    #MainMenu {visibility: hidden;}
+    footer {visibility: hidden;}
+    .app-footer {
+        text-align: center;
+        color: #94A3B8;
+        font-size: 0.8rem;
+        margin-top: 3rem;
+        padding-top: 1rem;
+        border-top: 1px solid #E2E8F0;
+    }
     </style>
     """,
     unsafe_allow_html=True,
 )
 
-st.markdown('<div class="main-title">Industrial Commerce Product AI Agent</div>', unsafe_allow_html=True)
-st.markdown('<div class="sub-title">Extract, enrich, scrape, and structure product intelligence for commerce catalogs</div>', unsafe_allow_html=True)
+MAX_PDF_SIZE_MB = 20
+
+st.markdown('<div class="main-title">Product Intelligence Assistant</div>', unsafe_allow_html=True)
+st.markdown(
+    '<div class="sub-title">Turn a part number, description, or product list into a ready-to-publish catalog entry</div>',
+    unsafe_allow_html=True,
+)
 
 with st.sidebar:
-    st.header("⚙️ Configuration")
-    api_url_input = st.text_input("FastAPI Service URL", API_URL)
-    st.markdown("---")
-    st.markdown("### Quick Examples")
-    if st.button("Sample 1: Proximity Sensor"):
+    st.header("✨ Try an Example")
+    st.caption("Load a sample product to see how it works")
+    if st.button("Proximity Sensor"):
         st.session_state["mpn"] = "XS618B1PAL2"
         st.session_state["brand"] = "Schneider Electric"
         st.session_state["desc"] = "Inductive proximity sensor 18mm 24VDC PNP NO"
-    if st.button("Sample 2: Industrial Motor"):
+    if st.button("Industrial Motor"):
         st.session_state["mpn"] = "1LA7096-4AA10"
         st.session_state["brand"] = "Siemens"
         st.session_state["desc"] = "3-phase asynchronous motor 1.5 kW 230/400V 1420 RPM"
-    if st.button("Sample 3: Pneumatic Cylinder"):
+    if st.button("Pneumatic Cylinder"):
         st.session_state["mpn"] = "DNC-32-100-PPV-A"
         st.session_state["brand"] = "Festo"
         st.session_state["desc"] = "Double-acting compact cylinder 32 mm bore 100 mm stroke"
 
-main_tab1, main_tab2 = st.tabs(["📦 Single Product Query", "📄 Upload PDF Product List (BOM / RFQ / Catalog)"])
+    st.markdown("---")
+    st.markdown("### ℹ️ How it works")
+    st.caption(
+        "Provide a part number and description (and optionally a product link), "
+        "and the assistant will research, structure, and enrich the listing for you."
+    )
+
+    st.markdown("---")
+    if st.button("🔄 Start Over", use_container_width=True):
+        for key in ("mpn", "brand", "desc", "pdf_extracted_data", "pdf_batch_results"):
+            st.session_state.pop(key, None)
+        st.rerun()
+
+main_tab1, main_tab2 = st.tabs(["📦 Single Product Lookup", "📄 Upload Product List (PDF)"])
 
 # ---------------------------------------------------------------------------
 # TAB 1: SINGLE PRODUCT QUERY
 # ---------------------------------------------------------------------------
 with main_tab1:
     with st.form("single_product"):
-        st.subheader("📦 Single Product Query Input")
+        st.subheader("📦 Product Details")
         col1, col2 = st.columns(2)
         with col1:
             mpn = st.text_input(
@@ -109,12 +135,12 @@ with main_tab1:
             )
 
         product_website_url = st.text_input(
-            "🌐 Product Page / Website URL (Agent will automatically extract product photo & specs from website)",
+            "🌐 Product Page / Website URL (optional)",
             placeholder="https://www.example.com/product/XS618B1PAL2",
-            help="Paste any manufacturer or distributor product URL. The AI Agent will automatically extract product images and datasheets.",
+            help="Paste any manufacturer or distributor product URL to automatically pull in images and specs.",
         )
 
-        with st.expander("📄 Additional Supporting Materials (Extra URLs & Spec Text)", expanded=False):
+        with st.expander("📄 Additional Supporting Materials (optional)", expanded=False):
             urls = st.text_area("Additional Product URLs (one per line)", placeholder="https://example.com/datasheet.pdf")
             supporting_text = st.text_area(
                 "Raw Spec / Catalog Text",
@@ -122,10 +148,13 @@ with main_tab1:
                 height=100,
             )
 
-        submitted = st.form_submit_button("🚀 Process & Generate Intelligence", use_container_width=True)
+        submitted = st.form_submit_button("🚀 Generate Product Listing", use_container_width=True)
+
+    if mpn and len(mpn.strip()) < 4:
+        st.caption("⚠️ That part number looks unusually short — double check it before submitting.")
 
     if submitted:
-        if not mpn or not brand or not desc:
+        if not mpn or not mpn.strip() or not brand or not brand.strip() or not desc or not desc.strip():
             st.error("Please fill in MPN, Brand, and Short description.")
         else:
             all_urls = []
@@ -142,17 +171,16 @@ with main_tab1:
                 "supporting_urls": all_urls,
                 "supporting_text": supporting_text.strip() if supporting_text else None,
             }
-            with st.spinner("🤖 Searching web, scraping datasheets, and running AI Gateway reasoning..."):
+            with st.spinner("🤖 Researching the product and building your listing..."):
                 try:
-                    target_url = api_url_input.rstrip("/")
-                    response = httpx.post(f"{target_url}/process-product", json=payload, timeout=300)
+                    response = httpx.post(f"{API_URL}/process-product", json=payload, timeout=300)
                 except Exception as exc:
-                    st.error(f"Failed to connect to backend API at `{api_url_input}`: {exc}")
+                    st.error(f"Something went wrong connecting to the service: {exc}")
                     response = None
 
             if response and response.is_success:
                 result = response.json()
-                st.success("✅ Product Intelligence Generated Successfully!")
+                st.success("✅ Product Listing Generated Successfully!")
 
                 # Top Overview Header
                 st.markdown("---")
@@ -174,9 +202,9 @@ with main_tab1:
                         if "placehold.co" not in display_img.lower():
                             st.caption(f"[🔗 Direct Image Link]({display_img})")
                         else:
-                            st.info("Showing generated placeholder. No direct web photo found.")
+                            st.info("Showing a placeholder image. No direct product photo was found.")
                     else:
-                        st.info("No web image extracted.")
+                        st.info("No product image found.")
 
                 with col_info:
                     st.markdown(f"<span class='badge'>{result.get('category', 'Industrial Component')}</span>", unsafe_allow_html=True)
@@ -186,7 +214,7 @@ with main_tab1:
 
                 # Tabs for structured data
                 tab_specs, tab_features, tab_norm, tab_evidence = st.tabs(
-                    ["📊 Specifications", "✨ Key Features & Apps", "🏷️ Normalized Attributes", "🔍 Traceability & Evidence"]
+                    ["📊 Specifications", "✨ Key Features & Applications", "🏷️ Normalized Attributes", "🔍 Sources & Notes"]
                 )
 
                 with tab_specs:
@@ -300,18 +328,18 @@ with main_tab1:
                         st.info("No normalized key-value attributes available.")
 
                 with tab_evidence:
-                    st.markdown("#### Evidence & Warnings")
+                    st.markdown("#### Sources & Notes")
                     evidence = result.get("source_evidence", [])
                     if evidence:
                         df_ev = pd.DataFrame(evidence)
                         st.dataframe(df_ev, use_container_width=True, hide_index=True)
                     if warnings := result.get("quality_warnings"):
-                        st.markdown("##### Quality Warnings")
+                        st.markdown("##### Notes")
                         for warn in warnings:
                             st.warning(warn)
 
                 st.download_button(
-                    "📥 Download Product Intelligence JSON",
+                    "📥 Download Listing (JSON)",
                     data=json.dumps(result, indent=2),
                     file_name=f"{mpn}.json",
                     mime="application/json",
@@ -319,40 +347,43 @@ with main_tab1:
             elif response:
                 try:
                     err = response.json()
-                    st.error(f"**HTTP {response.status_code} Error:** {err.get('detail', response.text)}")
+                    st.error(f"**Error:** {err.get('detail', response.text)}")
                 except Exception:
-                    st.error(f"HTTP {response.status_code}: {response.text}")
+                    st.error(f"Request failed (HTTP {response.status_code}). Please try again.")
 
 
 # ---------------------------------------------------------------------------
 # TAB 2: UPLOAD PDF PRODUCT LIST (BOM / RFQ / CATALOG)
 # ---------------------------------------------------------------------------
 with main_tab2:
-    st.subheader("📄 Upload Product List PDF (BOM / RFQ / Catalog)")
+    st.subheader("📄 Upload a Product List (PDF)")
     st.markdown(
-        "Upload any PDF document containing a list of products (e.g. Bills of Materials, purchase orders, "
-        "equipment procurement lists, RFQs, or product catalog tables). The AI Agent will automatically extract the product "
+        "Upload a PDF containing a list of products — such as a bill of materials, purchase order, "
+        "equipment list, RFQ, or catalog table — and the assistant will automatically pull out the part "
         "numbers, quantities, brands, and descriptions."
     )
 
     pdf_file = st.file_uploader(
         "Choose a PDF file",
         type=["pdf"],
-        help="Upload PDF containing part numbers, equipment lists, or bills of materials.",
+        help="Upload a PDF containing part numbers, equipment lists, or bills of materials.",
     )
 
     col_btn1, col_btn2 = st.columns([1, 1])
     with col_btn1:
         extract_button = st.button("🔍 Extract Products from PDF", use_container_width=True, disabled=pdf_file is None)
     with col_btn2:
-        process_all_button = st.button("🚀 Extract & Enrich All with AI Agent", use_container_width=True, disabled=pdf_file is None)
+        process_all_button = st.button("🚀 Extract & Enrich All Products", use_container_width=True, disabled=pdf_file is None)
+
+    if pdf_file is not None and pdf_file.size > MAX_PDF_SIZE_MB * 1024 * 1024:
+        st.error(f"This file is larger than {MAX_PDF_SIZE_MB}MB. Please upload a smaller PDF.")
+        pdf_file = None
 
     if extract_button and pdf_file is not None:
-        target_url = api_url_input.rstrip("/")
-        with st.spinner("📄 Reading PDF and extracting product items via AI..."):
+        with st.spinner("📄 Reading the PDF and identifying products..."):
             try:
                 files = {"file": (pdf_file.name, pdf_file.getvalue(), "application/pdf")}
-                response = httpx.post(f"{target_url}/upload-pdf-extract", files=files, timeout=120)
+                response = httpx.post(f"{API_URL}/upload-pdf-extract", files=files, timeout=120)
                 if response.is_success:
                     extracted_data = response.json()
                     st.session_state["pdf_extracted_data"] = extracted_data
@@ -360,14 +391,13 @@ with main_tab2:
                 else:
                     st.error(f"Failed to extract PDF: {response.text}")
             except Exception as exc:
-                st.error(f"Could not connect to API: {exc}")
+                st.error(f"Something went wrong connecting to the service: {exc}")
 
     if process_all_button and pdf_file is not None:
-        target_url = api_url_input.rstrip("/")
-        with st.spinner("🤖 Extracting products and running Batch AI Intelligence enrichment..."):
+        with st.spinner("🤖 Extracting products and generating listings for each one..."):
             try:
                 files = {"file": (pdf_file.name, pdf_file.getvalue(), "application/pdf")}
-                response = httpx.post(f"{target_url}/upload-pdf-process", files=files, timeout=600)
+                response = httpx.post(f"{API_URL}/upload-pdf-process", files=files, timeout=600)
                 if response.is_success:
                     batch_res = response.json()
                     st.session_state["pdf_batch_results"] = batch_res
@@ -375,7 +405,7 @@ with main_tab2:
                 else:
                     st.error(f"Failed batch processing: {response.text}")
             except Exception as exc:
-                st.error(f"Could not connect to API: {exc}")
+                st.error(f"Something went wrong connecting to the service: {exc}")
 
     # Display Extracted Products Summary if available
     if "pdf_extracted_data" in st.session_state:
@@ -438,7 +468,7 @@ with main_tab2:
         batch_data = st.session_state["pdf_batch_results"]
         results = batch_data.get("results", [])
         st.markdown("---")
-        st.markdown(f"### 🚀 AI Product Intelligence Results ({len(results)} Processed)")
+        st.markdown(f"### 🚀 Generated Product Listings ({len(results)} Processed)")
 
         for idx, item in enumerate(results):
             with st.expander(
@@ -466,8 +496,13 @@ with main_tab2:
                     st.dataframe(specs_df, use_container_width=True, hide_index=True)
 
         st.download_button(
-            "📥 Download Complete Batch Intelligence (JSON)",
+            "📥 Download Complete Batch Results (JSON)",
             data=json.dumps(batch_data, indent=2),
             file_name=f"enriched_{batch_data.get('filename', 'batch')}.json",
             mime="application/json",
         )
+
+st.markdown(
+    '<div class="app-footer">Powered by Product Intelligence Assistant</div>',
+    unsafe_allow_html=True,
+)
