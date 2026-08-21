@@ -3,10 +3,6 @@ import re
 import httpx
 import pandas as pd
 import streamlit as st
-from typing import Optional, List
-from pydantic import BaseModel, Field
-from langchain_groq import ChatGroq
-from langchain_core.prompts import ChatPromptTemplate
 
 # Fixed backend endpoint (not exposed/editable by the client)
 API_URL = "https://fackend.vercel.app"
@@ -114,11 +110,9 @@ def dedupe_normalized_attributes(norm_attrs: dict) -> dict:
 # The regex helpers above catch obvious junk cheaply and for free. Some noise
 # survives because it's made of real words in a nonsense pairing (e.g. a spec
 # named "Standard general" with value "purpose configuration") — a regex
-# can't tell that's broken, but an LLM can. This runs via LangChain's Groq
-# integration with structured output, so the model's response is validated
-# against a schema instead of hand-parsed JSON. It's the primary path when a
-# Groq key is configured, and always falls back to the regex-cleaned data if
-# the call fails or returns something invalid.
+# can't tell that's broken, but an LLM can. This is an OPTIONAL second pass:
+# it only runs if the user turns it on and provides a Groq API key, and it
+# always falls back to the regex-cleaned data if the call fails for any reason.
 # ---------------------------------------------------------------------------
 
 GROQ_MODEL = "llama-3.3-70b-versatile"
@@ -128,8 +122,12 @@ GROQ_SYSTEM_PROMPT = (
     "You will receive product data that has already had obvious junk removed, "
     "but may still contain sentence fragments, near-duplicates, or entries that "
     "aren't genuine technical specifications (brand mentions, image captions, "
-    "incomplete phrases). "
-    "Rewrite the description as 1-2 clear sentences a buyer would actually "
+    "incomplete phrases). Return ONLY valid JSON with this exact shape, no "
+    "other text: "
+    '{"description": string, '
+    '"specifications": [{"name": string, "value": string, "unit": string|null}], '
+    '"features": [string], "applications": [string]}. '
+    "Rules: rewrite description as 1-2 clear sentences a buyer would actually "
     "read. Drop any specification that is not a genuine, complete technical "
     "attribute. Merge duplicate or near-duplicate specifications. Keep at most "
     "6 features, each a real, complete capability statement. Never invent "
@@ -138,36 +136,33 @@ GROQ_SYSTEM_PROMPT = (
 )
 
 
-class PolishedSpec(BaseModel):
-    name: str = Field(description="Specification name, e.g. 'Voltage'")
-    value: str = Field(description="Specification value, e.g. '24'")
-    unit: Optional[str] = Field(default=None, description="Unit, e.g. 'VDC', or null if none")
-
-
-class PolishedListing(BaseModel):
-    description: str = Field(description="A clean 1-2 sentence product description")
-    specifications: List[PolishedSpec] = Field(default_factory=list)
-    features: List[str] = Field(default_factory=list, description="Up to 6 real feature statements")
-    applications: List[str] = Field(default_factory=list)
-
-
 @st.cache_data(show_spinner=False, ttl=3600)
 def polish_with_groq(payload_json: str, api_key: str):
-    """Send pre-cleaned product data to Groq (via LangChain) for a final
-    readability pass, using structured output so the response is validated
-    against a schema rather than hand-parsed. Returns a dict on success, or
-    None on any failure (caller falls back to the regex-cleaned data).
-    Cached so re-rendering the same product doesn't re-call the API."""
+    """Send pre-cleaned product data to Groq for a final readability pass.
+    Returns a dict on success, or None on any failure (caller falls back to
+    the regex-cleaned data). Cached so re-rendering the same product doesn't
+    re-call the API."""
     try:
-        llm = ChatGroq(model=GROQ_MODEL, api_key=api_key, temperature=0.2, timeout=20)
-        structured_llm = llm.with_structured_output(PolishedListing)
-        prompt = ChatPromptTemplate.from_messages([
-            ("system", GROQ_SYSTEM_PROMPT),
-            ("human", "{payload}"),
-        ])
-        chain = prompt | structured_llm
-        result = chain.invoke({"payload": payload_json})
-        return result.model_dump()
+        resp = httpx.post(
+            "https://api.groq.com/openai/v1/chat/completions",
+            headers={"Authorization": f"Bearer {api_key}", "Content-Type": "application/json"},
+            json={
+                "model": GROQ_MODEL,
+                "messages": [
+                    {"role": "system", "content": GROQ_SYSTEM_PROMPT},
+                    {"role": "user", "content": payload_json},
+                ],
+                "temperature": 0.2,
+                "response_format": {"type": "json_object"},
+            },
+            timeout=20,
+        )
+        resp.raise_for_status()
+        content = resp.json()["choices"][0]["message"]["content"]
+        parsed = json.loads(content)
+        if not isinstance(parsed, dict):
+            return None
+        return parsed
     except Exception:
         return None
 
