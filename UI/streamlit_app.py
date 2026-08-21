@@ -1,10 +1,108 @@
 import json
+import re
 import httpx
 import pandas as pd
 import streamlit as st
 
 # Fixed backend endpoint (not exposed/editable by the client)
 API_URL = "https://fackend.vercel.app"
+
+# ---------------------------------------------------------------------------
+# DATA CLEANUP HELPERS
+# Raw scraped/LLM output often contains leftover markdown table fragments,
+# stray headers, and "specs" that are really just repeated brand/datasheet
+# mentions. These helpers filter that noise before anything reaches the UI.
+# ---------------------------------------------------------------------------
+
+def _looks_like_junk(text: str) -> bool:
+    """True if a string is mostly separator/table-remnant characters."""
+    if not text:
+        return True
+    t = text.strip()
+    if len(t) < 2:
+        return True
+    non_separator = re.sub(r"[|\-\s_.:=+*#]", "", t)
+    return (len(non_separator) / max(len(t), 1)) < 0.3
+
+
+def _is_source_mention(name: str, value: str, brand: str) -> bool:
+    """True if a 'spec' is really just a datasheet/brand reference, not a real spec."""
+    name_l = name.lower()
+    if "datasheet" in name_l:
+        return True
+    if brand and value.strip().lower() == brand.strip().lower():
+        return True
+    return False
+
+
+def clean_specifications(specs, brand):
+    """Split raw spec entries into real specs vs. brand/datasheet mentions, dropping junk."""
+    real_specs, source_mentions, seen = [], [], set()
+    for spec in specs or []:
+        s_name = (spec.get("name") if isinstance(spec, dict) else getattr(spec, "name", "")) or ""
+        s_val = str((spec.get("value") if isinstance(spec, dict) else getattr(spec, "value", "")) or "")
+        s_unit = spec.get("unit") if isinstance(spec, dict) else getattr(spec, "unit", None)
+        raw_src = (spec.get("source") if isinstance(spec, dict) else getattr(spec, "source", None)) or "extracted_spec"
+
+        s_name, s_val = s_name.strip(), s_val.strip()
+        if not s_name or not s_val:
+            continue
+        if _looks_like_junk(s_name) or _looks_like_junk(s_val):
+            continue
+
+        key = (s_name.lower(), s_val.lower())
+        if key in seen:
+            continue
+        seen.add(key)
+
+        if _is_source_mention(s_name, s_val, brand):
+            source_mentions.append({"name": s_name, "value": s_val})
+            continue
+
+        real_specs.append({"name": s_name, "value": s_val, "unit": s_unit, "source": raw_src})
+    return real_specs, source_mentions
+
+
+def clean_features(features, max_items=8):
+    """Strip markdown/table remnants from feature bullets and dedupe."""
+    cleaned, seen = [], set()
+    for feat in features or []:
+        f = str(feat).strip()
+        if _looks_like_junk(f):
+            continue
+        f = re.sub(r"^#+\s*", "", f)  # strip markdown headers
+        f = f.strip("[]() ")
+        if not f:
+            continue
+        key = f.lower()
+        if key in seen:
+            continue
+        seen.add(key)
+        cleaned.append(f)
+        if len(cleaned) >= max_items:
+            break
+    return cleaned
+
+
+def clean_description(desc: str) -> str:
+    """Remove markdown header markers and collapse whitespace in free-text descriptions."""
+    if not desc:
+        return desc
+    d = re.sub(r"#+\s*", "", desc.strip())
+    d = re.sub(r"\s+", " ", d)
+    return d.strip()
+
+
+def dedupe_normalized_attributes(norm_attrs: dict) -> dict:
+    """Collapse keys that normalize to the same slug (e.g. 'diameter_/_size' vs 'diameter__size')."""
+    result, seen_slugs = {}, set()
+    for k, v in (norm_attrs or {}).items():
+        slug = re.sub(r"[^a-z0-9]", "", k.lower())
+        if slug in seen_slugs:
+            continue
+        seen_slugs.add(slug)
+        result[k] = v
+    return result
 
 st.set_page_config(
     page_title="Product Intelligence Assistant",
@@ -209,8 +307,10 @@ with main_tab1:
                 with col_info:
                     st.markdown(f"<span class='badge'>{result.get('category', 'Industrial Component')}</span>", unsafe_allow_html=True)
                     st.markdown(f"### {result.get('title')}")
-                    st.markdown(f"**MPN:** `{result.get('manufacturer_part_number')}` &nbsp;|&nbsp; **Brand:** `{result.get('brand')}` &nbsp;|&nbsp; **Confidence:** `{result.get('confidence', 'medium')}`")
-                    st.write(result.get("commerce_description"))
+                    conf = str(result.get("confidence", "medium")).lower()
+                    conf_color = {"high": "🟢", "medium": "🟡", "low": "🟠"}.get(conf, "⚪")
+                    st.markdown(f"**MPN:** `{result.get('manufacturer_part_number')}` &nbsp;|&nbsp; **Brand:** `{result.get('brand')}` &nbsp;|&nbsp; **Confidence:** {conf_color} {conf.title()}")
+                    st.write(clean_description(result.get("commerce_description")))
 
                 # Tabs for structured data
                 tab_specs, tab_features, tab_norm, tab_evidence = st.tabs(
@@ -231,15 +331,15 @@ with main_tab1:
                         "normalized": "Catalog Normalized",
                     }
 
-                    cleaned_specs = []
-                    for spec in specs:
-                        s_name = spec.get("name", "").strip() if isinstance(spec, dict) else getattr(spec, "name", "").strip()
-                        s_val = str(spec.get("value", "") if isinstance(spec, dict) else getattr(spec, "value", "")).strip()
-                        s_unit = spec.get("unit") if isinstance(spec, dict) else getattr(spec, "unit", None)
-                        raw_src = (spec.get("source") if isinstance(spec, dict) else getattr(spec, "source", None)) or "extracted_spec"
+                    real_specs, source_mentions = clean_specifications(specs, result.get("brand", ""))
+                    filtered_count = len(specs) - len(real_specs) - len(source_mentions)
 
-                        if not s_name or not s_val:
-                            continue
+                    cleaned_specs = []
+                    for spec in real_specs:
+                        s_name = spec["name"]
+                        s_val = spec["value"]
+                        s_unit = spec["unit"]
+                        raw_src = spec["source"]
 
                         unit_display = str(s_unit).strip() if s_unit and str(s_unit).strip() not in ("None", "nan") else "-"
                         source_display = source_labels.get(raw_src, raw_src.replace("_", " ").title())
@@ -250,6 +350,12 @@ with main_tab1:
                             "unit": unit_display,
                             "source": source_display,
                         })
+
+                    if filtered_count > 0 or source_mentions:
+                        st.caption(
+                            f"ℹ️ {filtered_count + len(source_mentions)} low-value or duplicate entries "
+                            f"were filtered out to keep this list clean and trustworthy."
+                        )
 
                     card_keywords = [
                         "voltage", "current", "power", "frequency", "temperature",
@@ -309,16 +415,24 @@ with main_tab1:
                     col_feat, col_app = st.columns(2)
                     with col_feat:
                         st.markdown("#### Key Features")
-                        for feat in result.get("key_features", []):
-                            st.markdown(f"- {feat}")
+                        feats = clean_features(result.get("key_features", []))
+                        if feats:
+                            for feat in feats:
+                                st.markdown(f"- {feat}")
+                        else:
+                            st.caption("No clean feature bullets were extracted for this product.")
                     with col_app:
                         st.markdown("#### Target Applications")
-                        for app in result.get("applications", []):
-                            st.markdown(f"- 🛠️ {app}")
+                        apps = [str(a).strip() for a in result.get("applications", []) if str(a).strip()]
+                        if apps:
+                            for app in apps:
+                                st.markdown(f"- 🛠️ {app}")
+                        else:
+                            st.caption("No target applications identified.")
 
                 with tab_norm:
                     st.markdown("#### Normalized Catalog Attributes")
-                    norm_attrs = result.get("normalized_attributes", {})
+                    norm_attrs = dedupe_normalized_attributes(result.get("normalized_attributes", {}))
                     if norm_attrs:
                         df_norm = pd.DataFrame(
                             [{"Attribute Key": k, "Normalized Value": v} for k, v in norm_attrs.items()]
@@ -333,6 +447,17 @@ with main_tab1:
                     if evidence:
                         df_ev = pd.DataFrame(evidence)
                         st.dataframe(df_ev, use_container_width=True, hide_index=True)
+                    else:
+                        st.caption("No source evidence recorded for this listing.")
+
+                    if source_mentions:
+                        with st.expander(f"📎 {len(source_mentions)} datasheet/brand references (filtered from specs)"):
+                            st.caption(
+                                "These were mentions of the datasheet or brand name picked up during scraping — "
+                                "not real technical specifications — so they were kept here instead of the specs table."
+                            )
+                            st.dataframe(pd.DataFrame(source_mentions), use_container_width=True, hide_index=True)
+
                     if warnings := result.get("quality_warnings"):
                         st.markdown("##### Notes")
                         for warn in warnings:
@@ -484,15 +609,19 @@ with main_tab2:
                     st.caption(f"**Category:** `{item.get('category')}`")
                 with c2:
                     st.markdown(f"#### {item.get('title')}")
-                    st.write(item.get("commerce_description"))
-                    if item.get("key_features"):
+                    st.write(clean_description(item.get("commerce_description")))
+                    item_feats = clean_features(item.get("key_features", []), max_items=3)
+                    if item_feats:
                         st.markdown("**Key Features:**")
-                        for feat in item["key_features"][:3]:
+                        for feat in item_feats:
                             st.markdown(f"- {feat}")
 
-                if item.get("specifications"):
+                item_real_specs, _ = clean_specifications(item.get("specifications", []), item.get("brand", ""))
+                if item_real_specs:
                     st.markdown("##### Specifications")
-                    specs_df = pd.DataFrame(item["specifications"])
+                    specs_df = pd.DataFrame(item_real_specs)[["name", "value", "unit"]].rename(
+                        columns={"name": "Specification", "value": "Value", "unit": "Unit"}
+                    )
                     st.dataframe(specs_df, use_container_width=True, hide_index=True)
 
         st.download_button(
