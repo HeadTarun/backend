@@ -118,21 +118,32 @@ def dedupe_normalized_attributes(norm_attrs: dict) -> dict:
 GROQ_MODEL = "llama-3.3-70b-versatile"
 
 GROQ_SYSTEM_PROMPT = (
-    "You are a technical catalog editor for an industrial parts commerce site. "
-    "You will receive product data that has already had obvious junk removed, "
-    "but may still contain sentence fragments, near-duplicates, or entries that "
-    "aren't genuine technical specifications (brand mentions, image captions, "
-    "incomplete phrases). Return ONLY valid JSON with this exact shape, no "
-    "other text: "
+    "You are a technical catalog copywriter for an industrial parts commerce site. "
+    "You are given a product's identity (brand, part number, category, title) plus "
+    "already-regex-cleaned specifications, and whatever raw description/feature/"
+    "application text was found for it. That raw text may be thin, awkward, "
+    "fragmented, or completely missing — your job is to WRITE clear, complete, "
+    "user-friendly catalog copy grounded in the given specs and identity, not just "
+    "tidy up the raw text. Return ONLY valid JSON with this exact shape, no other "
+    "text, no markdown fences: "
     '{"description": string, '
     '"specifications": [{"name": string, "value": string, "unit": string|null}], '
     '"features": [string], "applications": [string]}. '
-    "Rules: rewrite description as 1-2 clear sentences a buyer would actually "
-    "read. Drop any specification that is not a genuine, complete technical "
-    "attribute. Merge duplicate or near-duplicate specifications. Keep at most "
-    "6 features, each a real, complete capability statement. Never invent "
-    "values that are not present in the input — only clean up and reorganize "
-    "what's given."
+    "Rules: "
+    "- description: 1-2 clear, natural sentences a buyer would actually read — what "
+    "the part is and its core purpose, using the brand/category/specs given. "
+    "- features: up to 6 genuine, complete, plain-language capability statements "
+    "(e.g. 'IP67-rated housing suited to washdown environments'). DERIVE these from "
+    "the specifications and product identity even if the raw feature list is empty, "
+    "vague, or low quality — a thin input is not a reason to return few features. "
+    "- applications: up to 5 realistic use cases or industries for this part, "
+    "derived from its category, specs, and identity. "
+    "- You may explain what a spec means in plain buyer language (e.g. '24VDC "
+    "supply' -> 'runs on standard 24V DC control power'), but never invent a new "
+    "numeric value, rating, or capability that isn't present in or directly implied "
+    "by the given specs. "
+    "- Merge duplicate/near-duplicate specifications and drop any that are not a "
+    "genuine, complete technical attribute."
 )
 
 
@@ -165,6 +176,54 @@ def polish_with_groq(payload_json: str, api_key: str):
         return parsed
     except Exception:
         return None
+
+
+def polish_item_with_groq(desc, real_specs, feats, apps, max_feats=None,
+                           title=None, brand=None, mpn=None, category=None):
+    """Shared helper: send one product's identity + already-regex-cleaned
+    fields to Groq so it can WRITE user-friendly description/features/
+    applications grounded in the specs (not just reshuffle whatever raw text
+    came in — it fills gaps when the raw feature/application list is thin or
+    empty). Returns (desc, feats, specs, apps), falling back to the
+    regex-cleaned inputs on any failure. Used by both the single product tab
+    and the PDF batch results tab."""
+    polish_input = {
+        "product_identity": {
+            "title": title,
+            "brand": brand,
+            "manufacturer_part_number": mpn,
+            "category": category,
+        },
+        "description": desc,
+        "specifications": [
+            {"name": s["name"], "value": s["value"], "unit": s["unit"]} for s in real_specs
+        ],
+        "features": feats,
+        "applications": apps,
+    }
+    polished = polish_with_groq(json.dumps(polish_input, ensure_ascii=False), GROQ_API_KEY)
+
+    out_desc, out_feats, out_specs, out_apps = desc, feats, real_specs, apps
+    if polished:
+        out_desc = polished.get("description", desc)
+        out_feats = polished.get("features") or feats
+        if max_feats:
+            out_feats = out_feats[:max_feats]
+        out_apps = polished.get("applications") or apps
+        polished_specs = polished.get("specifications")
+        if polished_specs:
+            out_specs = [
+                {
+                    "name": s.get("name", ""),
+                    "value": s.get("value", ""),
+                    "unit": s.get("unit"),
+                    "source": "extracted_spec",
+                }
+                for s in polished_specs
+                if s.get("name") and s.get("value")
+            ]
+    return out_desc, out_feats, out_specs, out_apps
+
 
 st.set_page_config(
     page_title="Product Intelligence Assistant",
@@ -358,35 +417,16 @@ with main_tab1:
                 # --- AI polish pass (primary path when configured; silent fallback otherwise) ---
                 if AI_POLISH_ENABLED:
                     with st.spinner("🤖 Researching the product and building your listing..."):
-                        polish_input = {
-                            "description": clean_desc,
-                            "specifications": [
-                                {"name": s["name"], "value": s["value"], "unit": s["unit"]} for s in real_specs
-                            ],
-                            "features": clean_feats,
-                            "applications": clean_apps,
-                        }
-                        polished = polish_with_groq(json.dumps(polish_input, ensure_ascii=False), GROQ_API_KEY)
-
-                    if polished:
-                        clean_desc = polished.get("description", clean_desc)
-                        clean_feats = polished.get("features", clean_feats) or clean_feats
-                        clean_apps = polished.get("applications", clean_apps) or clean_apps
-                        polished_specs = polished.get("specifications")
-                        if polished_specs:
-                            real_specs = [
-                                {
-                                    "name": s.get("name", ""),
-                                    "value": s.get("value", ""),
-                                    "unit": s.get("unit"),
-                                    "source": "extracted_spec",
-                                }
-                                for s in polished_specs
-                                if s.get("name") and s.get("value")
-                            ]
-                    # If polish_with_groq returned None, real_specs/clean_feats/clean_apps/
-                    # clean_desc simply keep their regex-cleaned values — no error, no
-                    # indication to the client that anything different happened.
+                        clean_desc, clean_feats, real_specs, clean_apps = polish_item_with_groq(
+                            clean_desc, real_specs, clean_feats, clean_apps,
+                            title=result.get("title"),
+                            brand=result.get("brand"),
+                            mpn=result.get("manufacturer_part_number"),
+                            category=result.get("category"),
+                        )
+                    # If polish_with_groq returned None internally, the helper simply
+                    # returns the regex-cleaned values back — no error, no indication
+                    # to the client that anything different happened.
 
                 # Top Overview Header
                 st.markdown("---")
@@ -694,6 +734,79 @@ with main_tab2:
                     mime="application/json",
                     use_container_width=True,
                 )
+
+    # Display Batch AI Enriched Results if available
+    if "pdf_batch_results" in st.session_state:
+        batch_data = st.session_state["pdf_batch_results"]
+        results = batch_data.get("results", [])
+        st.markdown("---")
+        st.markdown(f"### 🚀 Generated Product Listings ({len(results)} Processed)")
+
+        for idx, item in enumerate(results):
+            with st.expander(
+                f"**#{idx + 1}: {item.get('brand')} — {item.get('manufacturer_part_number')}** | {item.get('title')}",
+                expanded=(idx == 0),
+            ):
+                # --- Regex cleanup pass (always runs as the safety net) ---
+                item_real_specs, _ = clean_specifications(item.get("specifications", []), item.get("brand", ""))
+                item_feats = clean_features(item.get("key_features", []), max_items=3)
+                item_desc = clean_description(item.get("commerce_description"))
+                item_apps = [str(a).strip() for a in item.get("applications", []) if str(a).strip()]
+
+                # --- AI polish pass (same Groq pass used in the single-product tab) ---
+                if AI_POLISH_ENABLED:
+                    item_desc, item_feats, item_real_specs, item_apps = polish_item_with_groq(
+                        item_desc, item_real_specs, item_feats, item_apps, max_feats=3,
+                        title=item.get("title"),
+                        brand=item.get("brand"),
+                        mpn=item.get("manufacturer_part_number"),
+                        category=item.get("category"),
+                    )
+
+                c1, c2 = st.columns([1, 3])
+                with c1:
+                    img = item.get("image_url") or (item.get("images") and item.get("images")[0])
+                    if img:
+                        st.image(img, use_container_width=True)
+                    st.caption(f"**Confidence:** `{item.get('confidence', 'medium')}`")
+                    st.caption(f"**Category:** `{item.get('category')}`")
+                with c2:
+                    st.markdown(f"#### {item.get('title')}")
+                    st.write(item_desc)
+                    feat_col, app_col = st.columns(2)
+                    with feat_col:
+                        if item_feats:
+                            st.markdown("**Key Features:**")
+                            for feat in item_feats:
+                                st.markdown(f"- {feat}")
+                        else:
+                            st.caption("No key features available.")
+                    with app_col:
+                        if item_apps:
+                            st.markdown("**Applications:**")
+                            for app in item_apps:
+                                st.markdown(f"- 🛠️ {app}")
+                        else:
+                            st.caption("No applications available.")
+
+                if item_real_specs:
+                    st.markdown("##### Specifications")
+                    specs_df = pd.DataFrame(item_real_specs)[["name", "value", "unit"]].rename(
+                        columns={"name": "Specification", "value": "Value", "unit": "Unit"}
+                    )
+                    st.dataframe(specs_df, use_container_width=True, hide_index=True)
+
+        st.download_button(
+            "📥 Download Complete Batch Results (JSON)",
+            data=json.dumps(batch_data, indent=2),
+            file_name=f"enriched_{batch_data.get('filename', 'batch')}.json",
+            mime="application/json",
+        )
+
+st.markdown(
+    '<div class="app-footer">Powered by Product Intelligence Assistant</div>',
+    unsafe_allow_html=True,
+)
 
     # Display Batch AI Enriched Results if available
     if "pdf_batch_results" in st.session_state:
