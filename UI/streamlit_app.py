@@ -1,11 +1,48 @@
 import json
 import re
+import threading
+import time
 import httpx
+import requests
 import pandas as pd
 import streamlit as st
 
 # Fixed backend endpoint (not exposed/editable by the client)
 API_URL = "https://fackend.vercel.app"
+
+# ---------------------------------------------------------------------------
+# KEEP-ALIVE / ANTI-SLEEP
+# Streamlit Community Cloud puts idle apps to sleep after a period of no
+# traffic. A background daemon thread self-pings this app's own public URL
+# every 5 minutes to keep it warm. Started via st.cache_resource so exactly
+# ONE thread exists per running app process, no matter how many times the
+# script reruns or how many sessions/tabs are open — cache_resource objects
+# are shared process-wide, unlike st.cache_data or st.session_state which
+# are per-value/per-session.
+# ---------------------------------------------------------------------------
+
+SELF_PING_URL = "https://newera.streamlit.app/"
+SELF_PING_INTERVAL_SECONDS = 7 * 60  # 5 minutes
+
+
+@st.cache_resource
+def _start_keepalive_thread():
+    def _ping_loop():
+        while True:
+            try:
+                requests.get(SELF_PING_URL, timeout=10)
+                print(f"[keepalive] pinged {SELF_PING_URL}")
+            except Exception as exc:
+                # Never let a failed ping crash the thread or surface to the client.
+                print(f"[keepalive] ping failed: {exc!r}")
+            time.sleep(SELF_PING_INTERVAL_SECONDS)
+
+    thread = threading.Thread(target=_ping_loop, daemon=True, name="keepalive-pinger")
+    thread.start()
+    return thread
+
+
+_start_keepalive_thread()
 
 # ---------------------------------------------------------------------------
 # DATA CLEANUP HELPERS
