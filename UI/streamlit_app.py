@@ -36,12 +36,29 @@ _BOILERPLATE_PATTERNS = [
 ]
 _BOILERPLATE_RE = re.compile("|".join(_BOILERPLATE_PATTERNS), re.IGNORECASE)
 
+_LABEL_ONLY_RE = re.compile(
+    r"^(description|specifications?|key features?|features?|applications?|"
+    r"primary brand|main function|overview|details|product details|"
+    r"technical specifications?|additional information|product information|"
+    r"brand|category|series|part number|sku|model|manufacturer)\s*:?\s*$",
+    re.IGNORECASE,
+)
+
+
+def _is_label_only(text: str) -> bool:
+    """True if a string is just a bare section/column header ('Description',
+    'Primary brand', 'Main function') with no actual content — a scrape
+    artifact from a table header or field label, not a real feature/spec."""
+    if not text:
+        return False
+    return bool(_LABEL_ONLY_RE.match(text.strip()))
+
 
 def _is_boilerplate(text: str) -> bool:
     """True if a string is website chrome (nav/CTA/contact info), not a real spec/feature."""
     if not text:
         return False
-    return bool(_BOILERPLATE_RE.search(text))
+    return bool(_BOILERPLATE_RE.search(text)) or _is_label_only(text)
 
 
 def _is_source_mention(name: str, value: str, brand: str) -> bool:
@@ -85,7 +102,8 @@ def clean_specifications(specs, brand):
 
 
 def clean_features(features, max_items=8):
-    """Strip markdown/table remnants from feature bullets and dedupe."""
+    """Strip markdown/table remnants from feature bullets, split dash-joined
+    spec dumps into atomic candidates, and dedupe."""
     cleaned, seen = [], set()
     for feat in features or []:
         f = str(feat).strip()
@@ -95,13 +113,26 @@ def clean_features(features, max_items=8):
         f = f.strip("[]() ")
         if not f:
             continue
-        key = f.lower()
-        if key in seen:
-            continue
-        seen.add(key)
-        cleaned.append(f)
-        if len(cleaned) >= max_items:
-            break
+
+        # A raw scrape often squishes several distinct specs into one
+        # dash-joined line, e.g. "+12bar - 20mm cushioning length -
+        # rectangular shape - equivalent to DNC32100PPV". Split these into
+        # separate candidates so downstream (LLM or display) sees atomic
+        # facts instead of one run-on fragment.
+        candidates = [f]
+        if f.count(" - ") >= 2:
+            candidates = [seg.strip() for seg in f.split(" - ") if seg.strip()]
+
+        for c in candidates:
+            if _is_boilerplate(c) or _looks_like_junk(c):
+                continue
+            key = c.lower()
+            if key in seen:
+                continue
+            seen.add(key)
+            cleaned.append(c)
+            if len(cleaned) >= max_items:
+                return cleaned
     return cleaned
 
 
@@ -165,6 +196,15 @@ GROQ_SYSTEM_PROMPT = (
     "by the given specs. "
     "- Merge duplicate/near-duplicate specifications and drop any that are not a "
     "genuine, complete technical attribute. "
+    "- The raw features/description you're given are often squished, run-on "
+    "fragments from a scraped spec table, e.g. '+12bar - 20mm cushioning length "
+    "- rectangular shape - equivalent to DNC32100PPV'. NEVER pass a fragment "
+    "like this through as-is. Split it into its component facts and rewrite "
+    "each as a complete plain-language sentence, e.g. 'Rated for operating "
+    "pressures up to 12 bar.', 'Features a 20mm cushioning length for smooth "
+    "end-of-stroke deceleration.', 'Rectangular body profile.', 'Direct "
+    "equivalent to part DNC32100PPV.' A feature that is just a bare noun "
+    "phrase or number+unit fragment with no verb is not acceptable output. "
     "- The raw description/features/applications you're given may contain website "
     "chrome that is NOT product content: navigation labels ('Read more', 'Show "
     "less'), contact/CTA text ('Help with this product', 'Start a chat', 'Call "
@@ -181,7 +221,10 @@ def polish_with_groq(payload_json: str, api_key: str):
     """Send pre-cleaned product data to Groq for a final readability pass.
     Returns a dict on success, or None on any failure (caller falls back to
     the regex-cleaned data). Cached so re-rendering the same product doesn't
-    re-call the API."""
+    re-call the API. Logs failures to stderr only (never surfaced to the
+    client) so silent fallbacks are diagnosable from server logs."""
+    if not api_key:
+        return None
     try:
         resp = httpx.post(
             "https://api.groq.com/openai/v1/chat/completions",
@@ -201,9 +244,11 @@ def polish_with_groq(payload_json: str, api_key: str):
         content = resp.json()["choices"][0]["message"]["content"]
         parsed = json.loads(content)
         if not isinstance(parsed, dict):
+            print(f"[groq-polish] non-dict response, falling back: {content[:300]!r}")
             return None
         return parsed
-    except Exception:
+    except Exception as exc:
+        print(f"[groq-polish] call failed, falling back to regex-cleaned data: {exc!r}")
         return None
 
 
