@@ -25,6 +25,25 @@ def _looks_like_junk(text: str) -> bool:
     return (len(non_separator) / max(len(t), 1)) < 0.3
 
 
+_BOILERPLATE_PATTERNS = [
+    r"\bread more\b", r"\bshow less\b", r"\bshow more\b",
+    r"\bhelp with this product\b", r"\bstart a chat\b",
+    r"\bcontact us\b", r"\bcall us\b", r"\bemail us\b",
+    r"\bresponse within\b", r"\blive chat\b", r"\bcustomer service\b",
+    r"\bfaq\b", r"\bsubscribe\b", r"\badd to cart\b", r"\bwishlist\b",
+    r"[\w.+-]+@[\w-]+\.[\w.-]+",          # emails
+    r"\+?\d[\d\s().-]{7,}\d",             # phone numbers
+]
+_BOILERPLATE_RE = re.compile("|".join(_BOILERPLATE_PATTERNS), re.IGNORECASE)
+
+
+def _is_boilerplate(text: str) -> bool:
+    """True if a string is website chrome (nav/CTA/contact info), not a real spec/feature."""
+    if not text:
+        return False
+    return bool(_BOILERPLATE_RE.search(text))
+
+
 def _is_source_mention(name: str, value: str, brand: str) -> bool:
     """True if a 'spec' is really just a datasheet/brand reference, not a real spec."""
     name_l = name.lower()
@@ -49,6 +68,8 @@ def clean_specifications(specs, brand):
             continue
         if _looks_like_junk(s_name) or _looks_like_junk(s_val):
             continue
+        if _is_boilerplate(s_name) or _is_boilerplate(s_val):
+            continue
 
         key = (s_name.lower(), s_val.lower())
         if key in seen:
@@ -68,7 +89,7 @@ def clean_features(features, max_items=8):
     cleaned, seen = [], set()
     for feat in features or []:
         f = str(feat).strip()
-        if _looks_like_junk(f):
+        if _looks_like_junk(f) or _is_boilerplate(f):
             continue
         f = re.sub(r"^#+\s*", "", f)  # strip markdown headers
         f = f.strip("[]() ")
@@ -143,7 +164,15 @@ GROQ_SYSTEM_PROMPT = (
     "numeric value, rating, or capability that isn't present in or directly implied "
     "by the given specs. "
     "- Merge duplicate/near-duplicate specifications and drop any that are not a "
-    "genuine, complete technical attribute."
+    "genuine, complete technical attribute. "
+    "- The raw description/features/applications you're given may contain website "
+    "chrome that is NOT product content: navigation labels ('Read more', 'Show "
+    "less'), contact/CTA text ('Help with this product', 'Start a chat', 'Call "
+    "us at...', emails, phone numbers), or other UI text picked up by mistake "
+    "during scraping. Treat any such lines as noise to be discarded entirely, "
+    "never as a feature or description to preserve, lightly edit, or count toward "
+    "'raw input available' — write fresh, grounded copy from the specs/identity "
+    "instead."
 )
 
 
@@ -222,6 +251,14 @@ def polish_item_with_groq(desc, real_specs, feats, apps, max_feats=None,
                 for s in polished_specs
                 if s.get("name") and s.get("value")
             ]
+
+    # Final safety net regardless of whether AI polish ran or fell back:
+    # never let boilerplate/CTA text reach the client, even if it slipped
+    # through the LLM pass or AI polish is disabled entirely.
+    out_desc = "" if _is_boilerplate(out_desc) else out_desc
+    out_feats = [f for f in out_feats if not _is_boilerplate(f)]
+    out_apps = [a for a in out_apps if not _is_boilerplate(a)]
+
     return out_desc, out_feats, out_specs, out_apps
 
 
@@ -427,6 +464,12 @@ with main_tab1:
                     # If polish_with_groq returned None internally, the helper simply
                     # returns the regex-cleaned values back — no error, no indication
                     # to the client that anything different happened.
+                else:
+                    # Even without AI polish, strip boilerplate that the regex
+                    # junk-filter alone can't catch (nav/CTA/contact text).
+                    clean_feats = [f for f in clean_feats if not _is_boilerplate(f)]
+                    clean_apps = [a for a in clean_apps if not _is_boilerplate(a)]
+                    clean_desc = "" if _is_boilerplate(clean_desc) else clean_desc
 
                 # Top Overview Header
                 st.markdown("---")
@@ -762,6 +805,10 @@ with main_tab2:
                         mpn=item.get("manufacturer_part_number"),
                         category=item.get("category"),
                     )
+                else:
+                    item_feats = [f for f in item_feats if not _is_boilerplate(f)]
+                    item_apps = [a for a in item_apps if not _is_boilerplate(a)]
+                    item_desc = "" if _is_boilerplate(item_desc) else item_desc
 
                 c1, c2 = st.columns([1, 3])
                 with c1:
